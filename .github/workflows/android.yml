@@ -10,10 +10,10 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js (Versão 22)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22 # Corrigido para a exigência do Capacitor
 
       - name: Install Dependencies
         run: npm install
