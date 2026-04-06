@@ -1,7 +1,11 @@
 name: Gerar APK do Entregador
 
+# O GATILHO AGORA É O PUSH AUTOMÁTICO
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - master  # Sempre que houver um push para a branch master, ele começa sozinho
+  workflow_dispatch: # Mantemos o botão manual também, por segurança
 
 jobs:
   build-android:
@@ -19,7 +23,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '20'
+          java-version: '21'
 
       - name: Instalar NPM
         run: npm install
