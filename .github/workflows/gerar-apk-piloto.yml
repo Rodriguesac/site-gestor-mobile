@@ -1,48 +1,45 @@
-name: 🛵 Gerar APK do Entregador
+name: Gerar APK do Entregador
 
-# Isto permite rodar a fábrica manualmente clicando num botão no GitHub
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 Baixar o código do projeto
+      - name: Baixar o codigo
         uses: actions/checkout@v4
 
-      - name: ⚙️ Preparar o Node.js
+      - name: Preparar Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: ☕ Preparar o Java (Android)
+      - name: Preparar Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: 📦 Instalar dependências (NPM)
+      - name: Instalar NPM
         run: npm install
 
-      - name: 🔑 MÁGICA: Isolar apenas o App do Piloto!
-        # Isto cria o desvio invisível para o Vite ignorar a loja e gerar só o entregador
+      - name: Isolar Entregador
         run: echo "VITE_TIPO_APP=entregador" > .env
 
-      - name: 🏗️ Construir o site (React/Vite)
+      - name: Build Vite
         run: npm run build
 
-      - name: 📱 Passar o código para o Capacitor (Android)
+      - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: 🔨 Gerar o APK final (Android Studio Core)
+      - name: Gerar APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: 🚀 Disponibilizar o APK para Download
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Rodrigues-Pilotos-APK
