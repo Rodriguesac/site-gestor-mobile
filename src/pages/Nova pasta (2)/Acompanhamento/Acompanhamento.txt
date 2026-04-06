@@ -1,0 +1,131 @@
+import React, { useEffect, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { db } from "../services/firebase";
+import { doc, onSnapshot } from "firebase/firestore";
+import * as Lucide from "lucide-react";
+import { motion } from "framer-motion";
+import { MapContainer, TileLayer, Marker } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+
+export default function AcompanhamentoCompacto() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [pedido, setPedido] = useState(null);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "pedidos", id), (snap) => {
+      if (snap.exists()) setPedido({ id: snap.id, ...snap.data() });
+    });
+    return () => unsub();
+  }, [id]);
+
+  if (!pedido) return <div className="min-h-screen bg-[#4B0082]" />;
+
+  return (
+    <div className="flex flex-col min-h-screen bg-[#4B0082] font-['Montserrat'] items-center overflow-x-hidden pb-32">
+      
+      {/* 1. HEADER - BANNER DE IDENTIFICAÇÃO */}
+      <header className="w-full max-w-[450px] bg-[#82C91E] px-6 pt-12 pb-20 flex justify-between items-start rounded-b-[3rem] shadow-2xl">
+        <div className="text-black">
+          <h1 className="text-xs font-[1000] italic uppercase leading-none">Rodrigues Açaí S.A.</h1>
+          <p className="text-[7px] font-black uppercase tracking-[0.2em] opacity-70">Logística de Precisão</p>
+        </div>
+        <div className="bg-black text-[#82C91E] px-3 py-1.5 rounded-xl shadow-lg">
+          <p className="text-[6px] font-bold uppercase opacity-60">ID_PEDIDO</p>
+          <p className="text-[10px] font-[1000] italic">#{id?.slice(-8).toUpperCase()}</p>
+        </div>
+      </header>
+
+      {/* 2. ÁREA CENTRALIZADA DOS CARDS */}
+      <main className="w-full max-w-[450px] px-5 -mt-10 space-y-5">
+        
+        {/* CARD STATUS (ALTO CONTRASTE) */}
+        <section className="bg-white p-8 rounded-[2.5rem] shadow-2xl text-center border-b-[6px] border-slate-100">
+          <p className="text-[9px] font-black text-slate-400 uppercase tracking-[0.4em] mb-4">Situação Atual</p>
+          <h2 className="text-4xl font-[1000] text-black italic uppercase tracking-tighter mb-4">
+            {pedido.status || "Pendente"}
+          </h2>
+          <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+            <motion.div initial={{ width: 0 }} animate={{ width: "40%" }} className="h-full bg-[#4B0082]" />
+          </div>
+        </section>
+
+        {/* CARD MAPA (RESPEITANDO O FLUXO) */}
+        <section className="bg-white p-3 rounded-[2.5rem] shadow-xl border border-slate-50">
+          <div className="h-52 w-full rounded-[2rem] overflow-hidden grayscale-[0.3]">
+            {pedido.endereco?.latlng && (
+              <MapContainer center={[pedido.endereco.latlng.lat, pedido.endereco.latlng.lng]} zoom={18} zoomControl={false} className="h-full w-full">
+                <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
+                <Marker position={[pedido.endereco.latlng.lat, pedido.endereco.latlng.lng]} />
+              </MapContainer>
+            )}
+          </div>
+          <div className="p-5 flex items-center gap-4">
+            <div className="bg-black text-[#82C91E] p-3 rounded-2xl shadow-xl">
+              <Lucide.MapPin size={20} strokeWidth={3} />
+            </div>
+            <div className="text-left">
+              <p className="text-[7px] font-black text-slate-400 uppercase italic mb-1">Ponto de Descarga</p>
+              <p className="text-[11px] font-[1000] text-black uppercase italic leading-none">{pedido.endereco?.rua}, {pedido.endereco?.numero}</p>
+            </div>
+          </div>
+        </section>
+
+        {/* DISCRIMINAÇÃO DE ITENS (CONTRASTE ROXO/PRETO) */}
+        <section className="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-50">
+          <h3 className="text-[10px] font-[1000] text-slate-300 uppercase tracking-widest italic mb-6">Dossiê de Carga</h3>
+          <div className="space-y-4">
+            {pedido.itens?.map((it, i) => (
+              <div key={i} className="bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
+                <div className="flex justify-between items-center mb-2">
+                  <h4 className="text-[10px] font-[1000] text-black uppercase italic">{it.nome || it.detalhes?.baseNome}</h4>
+                  <span className="text-[10px] font-black text-[#4B0082]">x{it.quantidade || 1}</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {it.detalhes?.acompanhamentos_detalhes?.map((acc, idx) => (
+                    <span key={idx} className="text-[7px] font-bold bg-white text-slate-500 px-2 py-0.5 rounded border border-slate-200 uppercase italic">{acc}</span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* FINANCEIRO FINAL */}
+        <section className="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-50">
+          <div className="flex justify-between items-end">
+            <div className="text-left">
+              <p className="text-[8px] font-black text-slate-400 uppercase italic mb-1 leading-none">Total à Liquidar</p>
+              <p className="text-4xl font-[1000] text-[#4B0082] italic tracking-tighter leading-none">R$ 55.75</p>
+            </div>
+            <div className="bg-[#82C91E] p-3 rounded-2xl shadow-lg text-black">
+              <Lucide.ShieldCheck size={26} strokeWidth={3} />
+            </div>
+          </div>
+        </section>
+
+      </main>
+
+      {/* 3. NAVBAR COMPACTA E CENTRALIZADA */}
+      <footer className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-[380px] bg-white border border-slate-100 px-6 py-3 flex justify-around items-center shadow-[0_15px_40px_rgba(0,0,0,0.2)] rounded-[2.5rem] z-50">
+        <button onClick={() => navigate('/')} className="text-[#4B0082] flex flex-col items-center gap-0.5 group">
+          <Lucide.Home size={20} strokeWidth={2.5} />
+          <span className="text-[7px] font-black uppercase italic tracking-tighter">Início</span>
+        </button>
+        <button className="text-slate-300 flex flex-col items-center gap-0.5 opacity-50">
+          <Lucide.Search size={20} />
+          <span className="text-[7px] font-black uppercase italic tracking-tighter">Menu</span>
+        </button>
+        <button className="text-slate-300 flex flex-col items-center gap-0.5 opacity-50 relative">
+          <div className="absolute top-0 right-0 w-1.5 h-1.5 bg-[#82C91E] rounded-full" />
+          <Lucide.ShoppingBag size={20} />
+          <span className="text-[7px] font-black uppercase italic tracking-tighter">Sacola</span>
+        </button>
+        <button className="text-slate-300 flex flex-col items-center gap-0.5 opacity-50">
+          <Lucide.User size={20} />
+          <span className="text-[7px] font-black uppercase italic tracking-tighter">Perfil</span>
+        </button>
+      </footer>
+    </div>
+  );
+}

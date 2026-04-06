@@ -1,121 +1,165 @@
 import React, { lazy, Suspense } from 'react';
-import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { UserProvider, useUser } from './context/UserContext';
 import { CartProvider } from './context/CartContext';
 
-import Home from './pages/Home';
-import Navigation from './components/Navigation';
-import Navbar from './components/Navbar';
+// Importação do Menu Lateral Admin
+import SidebarAdmin from './components/SidebarAdmin'; 
 
-// Lazy loading para performance
+import Home from './pages/Home';
+
+// --- ROTAS DO CLIENTE ---
 const Cardapio = lazy(() => import('./pages/Cardapio'));
 const MonteSeuAcai = lazy(() => import('./pages/MonteSeuAcai'));
-const Bebidas = lazy(() => import('./pages/Bebidas'));
 const Checkout = lazy(() => import('./pages/Checkout'));
 const Sucesso = lazy(() => import('./pages/Sucesso'));
 const Carrinho = lazy(() => import('./pages/Carrinho'));
+const LeilaoCliente = lazy(() => import('./pages/LeilaoCliente'));
 const Acompanhamento = lazy(() => import('./pages/Acompanhamento'));
 const Login = lazy(() => import('./pages/Login'));
 const Perfil = lazy(() => import('./pages/Perfil/Perfil'));
 const MeusDados = lazy(() => import('./pages/Perfil/MeusDados'));
-const MeusPedidos = lazy(() => import('./pages/Perfil/MeusPedidos'));
 const MeusEnderecos = lazy(() => import('./pages/Perfil/MeusEnderecos'));
+const MeusPedidos = lazy(() => import('./pages/Perfil/MeusPedidos'));
 
-// Loader minimalista com a cor da marca
-const PageLoader = () => (
-  <div className="min-h-screen flex items-center justify-center bg-[#0b0e13]">
-    <div className="w-12 h-12 border-4 border-white/5 border-t-[#82C91E] rounded-full animate-spin"></div>
-  </div>
-);
+/** * 👇 CAMINHO CORRIGIDO: 
+ * O arquivo está em src/pages/Perfil/DetalhesPedido.jsx 
+ */
+const DetalhesPedido = lazy(() => import('./pages/Perfil/DetalhesPedido')); 
 
-// Proteção de rotas privadas
+// --- ROTAS DE GESTÃO E LOGÍSTICA ---
+const GestorMobile = lazy(() => import('./pages/GestorMobile'));
+const EntregadorMobile = lazy(() => import('./pages/EntregadorMobile'));
+const TorreLogistica = lazy(() => import('./pages/TorreDeComando'));
+const PainelEntregadores = lazy(() => import('./pages/PainelEntregadores'));
+const ModuloLeilaoAdmin = lazy(() => import('./pages/ModuloLeilaoAdmin')); 
+const PainelLogistica = lazy(() => import('./pages/PainelLogistica'));
+
+// --- PROTEÇÃO DE ROTAS ---
 const PrivateRoute = ({ children }) => {
-  const user = localStorage.getItem('@RodriguesAcai:user');
+  const { user, loading } = useUser();
+  if (loading) return (
+    <div className="h-screen flex items-center justify-center bg-[#1F0137]">
+      <div className="w-10 h-10 border-4 border-[#82C91E] border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
   return user ? children : <Navigate to="/login" replace />;
 };
 
-/**
- * COMPONENTE DE LAYOUT ESTRUTURAL
- * Gerencia a visibilidade do Header e Navbar para evitar duplicidade 
- * e focar na experiência do usuário em fluxos críticos.
- */
-const Layout = React.memo(({ children }) => {
-  const location = useLocation();
-  
-  // Lista de páginas onde o Navigation (Header Global) e a Navbar NÃO devem aparecer.
-  // Nestas páginas, utilizamos o HeaderAcao dentro da própria página.
-  const esconderMenus = 
-    location.pathname.startsWith('/entregador') || 
-    location.pathname === '/login' ||
-    location.pathname === '/meus-enderecos' ||
-    location.pathname === '/carrinho' ||
-    location.pathname === '/monte-seu-acai' ||
-    location.pathname === '/checkout';
-
+// ==========================================
+// LAYOUT 1: APP MOBILE (Limitado a 450px)
+// ==========================================
+const ClientLayout = ({ children }) => {
   return (
-    <div className="bg-[#0b0e13] min-h-screen flex flex-col w-full m-0 p-0 overflow-x-hidden">
-      
-      {/* NAVIGATION GLOBAL (Logo, Endereço, Marquee)
-        Só aparece na Home, Cardápio, Bebidas e Perfil.
-      */}
-      {!esconderMenus && <Navigation />}
-      
-      {/* CONTEÚDO PRINCIPAL
-        Se esconderMenus for true, removemos a margem superior (mt-0) 
-        para que o Header de Ação da página cole no topo.
-      */}
-      <main className={`w-full flex-1 ${!esconderMenus ? 'mt-24 md:mt-24' : 'mt-0'} p-0 m-0`}> 
-        <Suspense fallback={<PageLoader />}>
-          {children}
-        </Suspense>
-
-        {/* Espaçador para o conteúdo não ficar atrás da Navbar fixa no mobile */}
-        {!esconderMenus && <div className="h-24 md:hidden w-full" />}
+    <div className="h-screen w-full bg-gradient-to-b from-[#1F0137] to-[#4B0082] font-montserrat antialiased overflow-hidden flex justify-center">
+      <main className="w-full max-w-[450px] h-full bg-transparent relative flex flex-col shadow-2xl">
+        <div className="flex-1 overflow-y-auto no-scrollbar">
+          <Suspense fallback={
+            <div className="h-screen flex items-center justify-center text-lime-400 font-black italic tracking-widest uppercase animate-pulse">
+              Carregando Rodrigues...
+            </div>
+          }>
+            {children}
+          </Suspense>
+        </div>
       </main>
-
-      {/* BARRA DE NAVEGAÇÃO INFERIOR
-        Essencial para o polegar no mobile. Escondida no Checkout e Monte Seu Açaí
-        para evitar que o cliente saia do fluxo de compra sem querer.
-      */}
-      {!esconderMenus && <Navbar />}
     </div>
   );
-});
+};
 
-export default function App() {
+// ==========================================
+// LAYOUT 2: TELA CHEIA COM SIDEBAR (Admin Dashboard)
+// ==========================================
+const FullScreenLayout = ({ children }) => {
   return (
-    <AuthProvider>
+    <div className="h-screen w-full bg-[#F8FAFC] font-sans antialiased overflow-hidden flex">
+      <SidebarAdmin /> 
+      
+      <main className="flex-1 h-full overflow-y-auto bg-[#F8FAFC]">
+          <Suspense fallback={
+            <div className="h-screen flex flex-col items-center justify-center bg-white gap-4">
+              <div className="w-12 h-12 border-4 border-[#4B0082] border-t-[#82C91E] rounded-full animate-spin" />
+              <span className="text-[#4B0082] font-black uppercase tracking-widest italic text-xs animate-pulse">Sincronizando Sistema...</span>
+            </div>
+          }>
+            {children}
+          </Suspense>
+      </main>
+    </div>
+  );
+};
+
+// ==========================================
+// ROTEADOR PRINCIPAL (COM DESVIO INTELIGENTE)
+// ==========================================
+export default function App() {
+  
+  // O Vite verifica automaticamente qual App compilar com base no .env
+  const TIPO_APP = import.meta.env.VITE_TIPO_APP;
+
+  // ==================================================================
+  // 🏍️ MODO ISOLADO: APP EXCLUSIVO DO ENTREGADOR
+  // ==================================================================
+  if (TIPO_APP === 'entregador') {
+    return (
+      <UserProvider>
+        <Routes>
+          {/* Abre o App do Piloto diretamente na rota "/" para gerar o APK só com esta página! */}
+          <Route path="/" element={
+            <ClientLayout>
+               <Suspense fallback={<div className="h-screen flex items-center justify-center bg-[#F4F6F8]"><div className="w-10 h-10 border-4 border-[#4B0082] border-t-transparent rounded-full animate-spin" /></div>}>
+                 <EntregadorMobile />
+               </Suspense>
+            </ClientLayout>
+          } />
+          {/* Bloqueia todas as outras rotas por segurança */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </UserProvider>
+    );
+  }
+
+  // ==================================================================
+  // 🍔 MODO COMPLETO: APP CLIENTE + DASHBOARD GESTÃO (SEU CÓDIGO ORIGINAL)
+  // ==================================================================
+  return (
+    <UserProvider>
       <CartProvider>
-        <Layout>
-          <Routes>
-            {/* Rotas Públicas */}
-            <Route path="/" element={<Home />} />
-            <Route path="/login" element={<Login />} /> 
-            <Route path="/cardapio" element={<Cardapio />} />
-            <Route path="/bebidas" element={<Bebidas />} />
-            
-            {/* Fluxo de Montagem e Carrinho (Foco Total) */}
-            <Route path="/monte-seu-acai" element={<MonteSeuAcai />} />
-            <Route path="/carrinho" element={<Carrinho />} />      
-            
-            {/* Pós-Compra */}
-            <Route path="/sucesso" element={<Sucesso />} />
-            <Route path="/acompanhamento/:id" element={<Acompanhamento />} />
+        <Routes>
+          <Route path="/login" element={<ClientLayout><Login /></ClientLayout>} />
 
-            {/* Rotas Protegidas (Perfil e Dados) */}
-            <Route path="/perfil" element={<PrivateRoute><Perfil /></PrivateRoute>} />
-            <Route path="/perfil/meus-dados" element={<PrivateRoute><MeusDados /></PrivateRoute>} />
-            <Route path="/pedidos" element={<PrivateRoute><MeusPedidos /></PrivateRoute>} />
-            <Route path="/meus-enderecos" element={<PrivateRoute><MeusEnderecos /></PrivateRoute>} />
-            
-            {/* Checkout (Finalização) */}
-            <Route path="/checkout" element={<PrivateRoute><Checkout /></PrivateRoute>} />
+          {/* ECOSSISTEMA 1: APP CLIENTE (Mobile) */}
+          <Route path="/leilao" element={<PrivateRoute><ClientLayout><LeilaoCliente /></ClientLayout></PrivateRoute>} />
+          <Route path="/" element={<PrivateRoute><ClientLayout><Home /></ClientLayout></PrivateRoute>} />
+          <Route path="/carrinho" element={<PrivateRoute><ClientLayout><Carrinho /></ClientLayout></PrivateRoute>} />
+          <Route path="/monte-seu-acai" element={<PrivateRoute><ClientLayout><MonteSeuAcai /></ClientLayout></PrivateRoute>} />
+          <Route path="/checkout" element={<PrivateRoute><ClientLayout><Checkout /></ClientLayout></PrivateRoute>} />
+          <Route path="/sucesso" element={<PrivateRoute><ClientLayout><Sucesso /></ClientLayout></PrivateRoute>} />
+          <Route path="/acompanhamento/:id" element={<PrivateRoute><ClientLayout><Acompanhamento /></ClientLayout></PrivateRoute>} />
+          
+          {/* 👇 ROTA DE DETALHES (CUPOM) REGISTRADA 👇 */}
+          <Route path="/detalhes-pedido/:id" element={<PrivateRoute><ClientLayout><DetalhesPedido /></ClientLayout></PrivateRoute>} />
+          
+          <Route path="/perfil" element={<PrivateRoute><ClientLayout><Perfil /></ClientLayout></PrivateRoute>} />
+          <Route path="/meus-dados" element={<PrivateRoute><ClientLayout><MeusDados /></ClientLayout></PrivateRoute>} />
+          <Route path="/meus-enderecos" element={<PrivateRoute><ClientLayout><MeusEnderecos /></ClientLayout></PrivateRoute>} />
+          <Route path="/pedidos" element={<PrivateRoute><ClientLayout><MeusPedidos /></ClientLayout></PrivateRoute>} />
 
-            {/* Fallback para rotas inexistentes */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Layout>
+          {/* ECOSSISTEMA 2: APP ENTREGADOR (Acesso normal caso não esteja em modo isolado) */}
+          <Route path="/entregador-mobile" element={<PrivateRoute><ClientLayout><EntregadorMobile /></ClientLayout></PrivateRoute>} />
+
+          {/* ECOSSISTEMA 3: GESTÃO E LOGÍSTICA (Dashboard Admin) */}
+          <Route path="/leilao-admin" element={<PrivateRoute><FullScreenLayout><ModuloLeilaoAdmin /></FullScreenLayout></PrivateRoute>} />
+          <Route path="/cardapio" element={<PrivateRoute><FullScreenLayout><Cardapio /></FullScreenLayout></PrivateRoute>} />
+          <Route path="/gestor-mobile" element={<PrivateRoute><FullScreenLayout><GestorMobile /></FullScreenLayout></PrivateRoute>} />
+          <Route path="/torre-logistica" element={<PrivateRoute><FullScreenLayout><TorreLogistica /></FullScreenLayout></PrivateRoute>} />
+          <Route path="/painel-entregadores" element={<PrivateRoute><FullScreenLayout><PainelEntregadores /></FullScreenLayout></PrivateRoute>} />
+          <Route path="/painel-logistica" element={<PrivateRoute><FullScreenLayout><PainelLogistica /></FullScreenLayout></PrivateRoute>} />
+
+          {/* Fallback */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </CartProvider>
-    </AuthProvider>
+    </UserProvider>
   );
 }

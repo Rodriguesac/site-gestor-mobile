@@ -1,192 +1,254 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Lucide from 'lucide-react';
 import { auth, db } from '../../services/firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { onAuthStateChanged, RecaptchaVerifier, signInWithPhoneNumber } from 'firebase/auth';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 
-// MÁSCARAS
-const mCPF = (v) => v.replace(/\D/g, '').replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d{1,2})/, '$1-$2').slice(0, 14);
-const mData = (v) => v.replace(/\D/g, '').replace(/(\d{2})(\d)/, '$1/$2').replace(/(\d{2})(\d)/, '$1/$2').replace(/(\d{4})(\d)/, '$1').slice(0, 10);
-const mTel = (v) => v.replace(/\D/g, '').replace(/^(\d{2})(\d)/g, "($1) $2").replace(/(\d{5})(\d)/, "$1-$2").slice(0, 15);
+// --- MÁSCARAS DE FORMATAÇÃO ---
+const maskCPF = (value) => {
+  return value
+    .replace(/\D/g, '') // Remove tudo o que não é dígito
+    .replace(/(\d{3})(\d)/, '$1.$2') // Coloca um ponto entre o terceiro e o quarto dígitos
+    .replace(/(\d{3})(\d)/, '$1.$2') // Coloca um ponto entre o terceiro e o quarto dígitos de novo
+    .replace(/(\d{3})(\d{1,2})$/, '$1-$2') // Coloca um hífen entre o terceiro e o quarto dígitos
+    .slice(0, 14); // Limita a 14 caracteres
+};
+
+const maskTelefone = (value) => {
+  return value
+    .replace(/\D/g, '') 
+    .replace(/^(\d{2})(\d)/g, '($1) $2') 
+    .replace(/(\d{5})(\d)/, '$1-$2') 
+    .slice(0, 15); 
+};
 
 export default function MeusDados() {
   const navigate = useNavigate();
-  const recaptchaRef = useRef(null); // Referência para não perder o mapa
-  
+
+  // --- ESTADOS DO FORMULÁRIO ---
+  const [nome, setNome] = useState('');
+  const [email, setEmail] = useState('');
+  const [cpf, setCpf] = useState('');
+  const [telefone, setTelefone] = useState('');
+
+  // --- ESTADOS DA TELA ---
   const [loading, setLoading] = useState(true);
   const [salvando, setSalvando] = useState(false);
-  const [status, setStatus] = useState({ tipo: '', texto: '' });
-  const [bloqueado, setBloqueado] = useState(false);
-  
-  const [confirmacao, setConfirmacao] = useState(null);
-  const [codigoSms, setCodigoSms] = useState('');
-  const [etapaSms, setEtapaSms] = useState(false);
-  const [telVerificado, setTelVerificado] = useState(false);
-  const [formData, setFormData] = useState({ nome: '', cpf: '', dataNascimento: '', telefone: '' });
+  const [mensagem, setMensagem] = useState({ tipo: '', texto: '' });
 
+  // --- BUSCAR DADOS NO FIREBASE ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        const docSnap = await getDoc(doc(db, "usuarios", user.uid));
-        if (docSnap.exists()) {
-          const d = docSnap.data();
-          if (d.cpf) setBloqueado(true);
-          if (d.telefoneVerificado) setTelVerificado(true);
-          setFormData({
-            nome: d.nome || '',
-            cpf: d.cpf ? mCPF(d.cpf) : '',
-            dataNascimento: d.dataNascimento ? mData(d.dataNascimento) : '',
-            telefone: d.telefone ? mTel(d.telefone) : '',
-          });
+        try {
+          const docRef = doc(db, 'usuarios', user.uid);
+          const docSnap = await getDoc(docRef);
+
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            setNome(data.nome || user.displayName || '');
+            setEmail(data.email || user.email || '');
+            setCpf(data.cpf || '');
+            setTelefone(data.telefone || '');
+          } else {
+            // Se não existir, preenche com os dados básicos de login do Google
+            setNome(user.displayName || '');
+            setEmail(user.email || '');
+          }
+        } catch (error) {
+          console.error("Erro ao buscar dados: ", error);
         }
-      } else { navigate('/login'); }
+      } else {
+        // Se não estiver logado, manda pro login ou home
+        navigate('/');
+      }
       setLoading(false);
     });
+
     return () => unsubscribe();
   }, [navigate]);
 
-  const enviarCodigoSms = async () => {
-    setStatus({ tipo: '', texto: '' });
-    
-    // Limpeza segura sem destruir a div principal
-    if (window.recaptchaVerifier) {
-      try {
-        window.recaptchaVerifier.clear();
-        if (recaptchaRef.current) recaptchaRef.current.innerHTML = '';
-      } catch (e) { console.error("Erro ao limpar:", e); }
-    }
-
-    const telLimpo = "+55" + formData.telefone.replace(/\D/g, '');
-    
-    try {
-      // Inicializa o verificado usando a Ref
-      window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaRef.current, {
-        'size': 'invisible',
-        'callback': () => { /* reCAPTCHA resolvido */ }
-      });
-
-      const result = await signInWithPhoneNumber(auth, telLimpo, window.recaptchaVerifier);
-      setConfirmacao(result);
-      setEtapaSms(true);
-      setStatus({ tipo: 'sucesso', texto: 'CÓDIGO ENVIADO!' });
-    } catch (error) {
-      console.error("Erro SMS:", error);
-      setStatus({ tipo: 'erro', texto: 'ERRO AO ENVIAR. USE NÚMEROS DE TESTE.' });
-      if (window.recaptchaVerifier) window.recaptchaVerifier.clear();
-    }
-  };
-
-  const validarCodigoSms = async () => {
-    try {
-      await confirmacao.confirm(codigoSms);
-      setTelVerificado(true);
-      setEtapaSms(false);
-      setStatus({ tipo: 'sucesso', texto: 'WHATSAPP VALIDADO!' });
-    } catch (error) {
-      setStatus({ tipo: 'erro', texto: 'CÓDIGO INVÁLIDO.' });
-    }
-  };
-
-  const salvarFinal = async (e) => {
+  // --- SALVAR DADOS ---
+  const handleSalvar = async (e) => {
     e.preventDefault();
-    if (!telVerificado) return setStatus({ tipo: 'erro', texto: 'VALIDE O WHATSAPP PRIMEIRO.' });
+    setMensagem({ tipo: '', texto: '' });
+
+    // Validações Básicas
+    if (!nome || !email || !telefone) {
+      setMensagem({ tipo: 'erro', texto: 'Preencha todos os campos obrigatórios.' });
+      return;
+    }
+    if (cpf && cpf.length < 14) {
+      setMensagem({ tipo: 'erro', texto: 'O CPF digitado está incompleto.' });
+      return;
+    }
+
     setSalvando(true);
+
     try {
-      const updates = {
-        nome: formData.nome.toUpperCase(),
-        telefone: formData.telefone,
-        telefoneVerificado: true,
-        cpf: formData.cpf.replace(/\D/g, ''),
-        dataNascimento: formData.dataNascimento,
-        updatedAt: new Date()
-      };
-      await updateDoc(doc(db, "usuarios", auth.currentUser.uid), updates);
-      setStatus({ tipo: 'sucesso', texto: 'DADOS ATUALIZADOS!' });
-      setBloqueado(true);
-      if(localStorage.getItem('carrinho_rodrigues')) navigate('/checkout');
-    } catch (error) { setStatus({ tipo: 'erro', texto: 'FALHA AO SALVAR.' }); }
-    setSalvando(false);
+      const user = auth.currentUser;
+      if (user) {
+        const payload = {
+          nome,
+          email,
+          cpf,
+          telefone,
+          updatedAt: serverTimestamp()
+        };
+
+        // Salva no Firestore
+        await setDoc(doc(db, 'usuarios', user.uid), payload, { merge: true });
+
+        // Sincroniza com o LocalStorage para navegação rápida
+        const currentLocal = JSON.parse(localStorage.getItem('@RodriguesAcai:user')) || {};
+        localStorage.setItem('@RodriguesAcai:user', JSON.stringify({ ...currentLocal, ...payload, uid: user.uid }));
+
+        setMensagem({ tipo: 'sucesso', texto: 'Dados atualizados com sucesso!' });
+        
+        // Remove a mensagem de sucesso após 3 segundos
+        setTimeout(() => setMensagem({ tipo: '', texto: '' }), 3000);
+      }
+    } catch (error) {
+      console.error("Erro ao salvar: ", error);
+      setMensagem({ tipo: 'erro', texto: 'Erro ao atualizar dados. Tente novamente.' });
+    } finally {
+      setSalvando(false);
+    }
   };
 
-  if (loading) return <div className="h-screen flex items-center justify-center font-black italic text-zinc-300 uppercase">Carregando...</div>;
+  const vibrar = () => { if (navigator.vibrate) navigator.vibrate(50); };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-[#82C91E] border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-zinc-50 pb-10 font-ifood">
-      {/* DIV DO MAPA/RECAPTCHA - CRÍTICA PARA FUNCIONAR */}
-      <div ref={recaptchaRef} id="recaptcha-container"></div>
-
-      <div className="bg-white p-4 md:p-6 border-b border-zinc-100 flex items-center gap-4 sticky top-0 z-10">
-          <button onClick={() => navigate(-1)} className="p-2 bg-zinc-50 rounded-full text-[#ea1d2c]"><Lucide.ChevronLeft /></button>
-          <h1 className="text-xl md:text-2xl font-[1000] uppercase italic tracking-tighter">Meus <span className="text-[#ea1d2c]">Dados</span></h1>
-      </div>
-
-      <div className="max-w-2xl mx-auto p-4 space-y-4 mt-2">
-        {status.texto && (
-          <div className={`p-4 rounded-2xl font-black text-center text-[10px] uppercase italic animate-bounce ${status.tipo === 'sucesso' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-            {status.texto}
+    <div className="min-h-screen bg-slate-50 font-sans pb-32">
+      
+      {/* HEADER PREMIUM */}
+      <header className="bg-white p-6 pb-8 rounded-b-[3rem] shadow-xl border-b border-slate-100 mb-8 sticky top-0 z-50">
+        <div className="max-w-[500px] mx-auto flex items-center gap-4">
+          <button 
+            onClick={() => { vibrar(); navigate(-1); }} 
+            className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center text-[#4B0082] shadow-inner active:scale-90 transition-all border border-slate-100"
+          >
+            <Lucide.ChevronLeft size={28} strokeWidth={3} />
+          </button>
+          <div>
+            <h1 className="text-2xl font-[1000] italic uppercase tracking-tighter text-[#4B0082] leading-none">
+              Meus <span className="text-[#82C91E]">Dados</span>
+            </h1>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Sua identidade na loja</p>
           </div>
-        )}
-
-        {/* BOX INFORMAÇÕES PESSOAIS */}
-        <div className="bg-white p-5 md:p-8 rounded-[2.5rem] border border-zinc-100 shadow-sm space-y-5">
-            <div className="space-y-1">
-              <label className="text-[10px] font-black text-zinc-400 uppercase italic ml-2">Nome Completo</label>
-              <input readOnly={bloqueado} type="text" value={formData.nome} onChange={(e) => setFormData({...formData, nome: e.target.value})}
-              className="w-full p-4 bg-zinc-50 rounded-2xl font-bold border-2 border-transparent focus:border-zinc-900 outline-none transition-all" />
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-zinc-400 uppercase italic ml-2">CPF</label>
-                <input readOnly={bloqueado} type="text" value={formData.cpf} onChange={(e) => setFormData({...formData, cpf: mCPF(e.target.value)})}
-                className="w-full p-4 bg-zinc-50 rounded-2xl font-bold border-2 border-transparent outline-none" />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-zinc-400 uppercase italic ml-2">Nascimento</label>
-                <input readOnly={bloqueado} type="text" value={formData.dataNascimento} onChange={(e) => setFormData({...formData, dataNascimento: mData(e.target.value)})}
-                className="w-full p-4 bg-zinc-50 rounded-2xl font-bold border-2 border-transparent outline-none" />
-              </div>
-            </div>
         </div>
+      </header>
 
-        {/* BOX WHATSAPP */}
-        <div className="bg-white p-5 md:p-8 rounded-[2.5rem] border border-zinc-100 shadow-sm space-y-4">
-          <p className="text-[10px] font-black text-zinc-400 uppercase italic mb-2">Validação de Segurança</p>
-          {!telVerificado ? (
-            <div className="space-y-4">
-              <div className="flex flex-col md:flex-row gap-2">
-                <input type="text" value={formData.telefone} onChange={(e) => setFormData({...formData, telefone: mTel(e.target.value)})} 
-                className="flex-1 bg-zinc-50 p-4 rounded-2xl font-black text-xl outline-none border-2 border-transparent focus:border-[#82C91E]" placeholder="(00) 00000-0000" />
-                {!etapaSms && (
-                  <button onClick={enviarCodigoSms} className="bg-zinc-900 text-white py-4 md:py-0 md:px-8 rounded-2xl font-black uppercase text-xs active:scale-95 transition-all">Enviar SMS</button>
-                )}
-              </div>
-              
-              {etapaSms && (
-                <div className="flex gap-2 animate-in slide-in-from-top-2">
-                  <input type="text" value={codigoSms} onChange={(e) => setCodigoSms(e.target.value)} placeholder="000000"
-                  className="flex-1 bg-green-50 border-2 border-[#82C91E] p-4 rounded-2xl font-black text-center text-xl tracking-[0.3em] outline-none" maxLength={6} />
-                  <button onClick={validarCodigoSms} className="bg-[#82C91E] text-white px-8 rounded-2xl font-black uppercase text-xs">Validar</button>
-                </div>
-              )}
+      <main className="px-6 max-w-[500px] mx-auto">
+        <form onSubmit={handleSalvar} className="space-y-6">
+          
+          {/* CARD DE INFORMAÇÕES */}
+          <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-100 space-y-5 relative overflow-hidden">
+            
+            {/* Elemento de Design de Fundo */}
+            <div className="absolute -top-10 -right-10 w-32 h-32 bg-[#4B0082]/5 rounded-full blur-2xl pointer-events-none"></div>
+
+            {/* CAMPO NOME */}
+            <div>
+              <label className="text-[10px] font-black text-[#4B0082] uppercase ml-2 flex items-center gap-1 mb-1">
+                <Lucide.User size={12} className="text-[#82C91E]" /> Nome Completo *
+              </label>
+              <input 
+                type="text" 
+                value={nome} 
+                onChange={(e) => setNome(e.target.value)}
+                placeholder="Seu nome completo"
+                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-[#4B0082] font-black text-sm outline-none focus:border-[#82C91E] transition-all"
+              />
             </div>
-          ) : (
-            <div className="flex items-center justify-between bg-green-50 p-5 rounded-2xl border border-green-100">
-              <div className="flex flex-col">
-                <span className="text-[9px] font-black text-green-600 uppercase italic">WhatsApp Verificado</span>
-                <span className="font-black text-xl text-zinc-800">{formData.telefone}</span>
-              </div>
-              <Lucide.ShieldCheck size={32} className="text-green-500" />
+
+            {/* CAMPO CPF */}
+            <div>
+              <label className="text-[10px] font-black text-[#4B0082] uppercase ml-2 flex items-center gap-1 mb-1">
+                <Lucide.FileText size={12} className="text-[#82C91E]" /> CPF (Para Recibos e InfinitePay)
+              </label>
+              <input 
+                type="text" 
+                value={cpf} 
+                onChange={(e) => setCpf(maskCPF(e.target.value))}
+                placeholder="000.000.000-00"
+                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-[#4B0082] font-black text-sm outline-none focus:border-[#82C91E] transition-all"
+              />
+            </div>
+
+            {/* CAMPO WHATSAPP */}
+            <div>
+              <label className="text-[10px] font-black text-[#4B0082] uppercase ml-2 flex items-center gap-1 mb-1">
+                <Lucide.Smartphone size={12} className="text-[#82C91E]" /> WhatsApp *
+              </label>
+              <input 
+                type="tel" 
+                value={telefone} 
+                onChange={(e) => setTelefone(maskTelefone(e.target.value))}
+                placeholder="(00) 00000-0000"
+                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-[#4B0082] font-black text-sm outline-none focus:border-[#82C91E] transition-all"
+              />
+            </div>
+
+            {/* CAMPO E-MAIL */}
+            <div>
+              <label className="text-[10px] font-black text-[#4B0082] uppercase ml-2 flex items-center gap-1 mb-1">
+                <Lucide.Mail size={12} className="text-[#82C91E]" /> E-mail (Para Comprovantes) *
+              </label>
+              <input 
+                type="email" 
+                value={email} 
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seuemail@exemplo.com"
+                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-[#4B0082] font-black text-sm outline-none focus:border-[#82C91E] transition-all"
+              />
+            </div>
+          </div>
+
+          {/* MENSAGENS DE ERRO OU SUCESSO */}
+          {mensagem.texto && (
+            <div className={`p-4 rounded-2xl font-bold text-[11px] uppercase flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 ${mensagem.tipo === 'erro' ? 'bg-red-50 text-red-500 border border-red-100' : 'bg-green-50 text-green-600 border border-green-100'}`}>
+              {mensagem.tipo === 'erro' ? <Lucide.AlertTriangle size={18} /> : <Lucide.CheckCircle size={18} />}
+              {mensagem.texto}
             </div>
           )}
-        </div>
 
-        <button onClick={salvarFinal} disabled={!telVerificado || salvando} 
-        className="w-full bg-[#82C91E] text-white p-6 rounded-[2.5rem] font-[1000] uppercase italic text-lg shadow-xl shadow-green-100 disabled:grayscale disabled:opacity-50 active:scale-95 transition-all">
-          {salvando ? 'A GUARDAR...' : 'SALVAR E FINALIZAR'}
-        </button>
-      </div>
+          {/* BOTÃO SALVAR */}
+          <button 
+            type="submit" 
+            disabled={salvando}
+            onClick={vibrar}
+            className={`w-full py-5 rounded-[2rem] font-[1000] uppercase italic text-lg flex items-center justify-center gap-3 shadow-xl transition-all ${salvando ? 'bg-slate-200 text-slate-400 scale-95' : 'bg-[#82C91E] text-[#4B0082] active:scale-95 hover:bg-[#95df2b]'}`}
+          >
+            {salvando ? (
+              <>
+                <Lucide.Loader2 size={24} className="animate-spin" /> Salvando...
+              </>
+            ) : (
+              <>
+                <Lucide.Save size={24} /> Atualizar Cadastro
+              </>
+            )}
+          </button>
+        </form>
+
+        {/* INFORMAÇÃO DE SEGURANÇA */}
+        <div className="mt-8 flex flex-col items-center text-center opacity-50">
+          <Lucide.ShieldCheck size={24} className="text-slate-400 mb-2" />
+          <p className="text-[9px] font-black text-slate-400 uppercase leading-relaxed max-w-[250px]">
+            Seus dados estão protegidos com criptografia ponta-a-ponta no Google Cloud.
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

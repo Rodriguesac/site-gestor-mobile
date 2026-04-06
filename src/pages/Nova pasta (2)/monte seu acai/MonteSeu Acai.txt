@@ -1,0 +1,351 @@
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import * as Lucide from 'lucide-react';
+import { db } from '../services/firebase'; 
+import { collection, onSnapshot } from 'firebase/firestore';
+import { motion, AnimatePresence } from 'framer-motion';
+
+// --- CONFIGURAÇÕES DE ESTILO E ANIMAÇÃO ---
+const springTransition = { type: "spring", stiffness: 300, damping: 30 };
+
+// --- ÍCONES DAS ETAPAS (SUGESTÃO 2) ---
+const iconesEtapa = [
+  { Icon: Lucide.IceCream, label: 'Bases' },
+  { Icon: Lucide.Maximize, label: 'Tamanhos' },
+  { Icon: Lucide.Apple, label: 'Grátis' },
+  { Icon: Lucide.Droplets, label: 'Caldas' },
+  { Icon: Lucide.PlusCircle, label: 'Adds' },
+  { Icon: Lucide.Utensils, label: 'Colher' },
+  { Icon: Lucide.Tag, label: 'Etiqueta' }
+];
+
+export default function MonteSeuAcaiRodriguesUltimate() {
+  const navigate = useNavigate();
+  const mainRef = useRef(null);
+
+  // --- ESTADOS CORE ---
+  const [etapa, setEtapa] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [modalSucesso, setModalSucesso] = useState(false);
+  const [hora, setHora] = useState('12:00');
+  const [shake, setShake] = useState(false);
+
+  // --- DATABASE STATES ---
+  const [bases, setBases] = useState([]);
+  const [recipientes, setRecipientes] = useState({});
+  const [gratis, setGratis] = useState([]);
+  const [adicionais, setAdicionais] = useState([]);
+  const [coberturas, setCoberturas] = useState([]);
+  const [colheres, setColheres] = useState([]);
+
+  // --- ESTADO DO PEDIDO (COM PERSISTÊNCIA DE RASCUNHO) ---
+  const [pedido, setPedido] = useState(() => {
+    const salvo = sessionStorage.getItem('rascunho_rodrigues');
+    return salvo ? JSON.parse(salvo) : {
+      base: '', baseNome: '', baseCat: '', precoChave: '', tamanho: '',
+      acompanhamentos: [], cobertura: '', colher: '', adicionais: [],
+      total: 0, nomePersonalizado: '', foto: '', observacao: ''
+    };
+  });
+
+  // --- 1. SISTEMA DE VIBRAÇÃO & SOM (ANDROID NATIVO) ---
+  const hapticFeedback = useCallback((type = 'light') => {
+    if (!window.navigator.vibrate) return;
+    if (type === 'light') window.navigator.vibrate(10);
+    if (type === 'medium') window.navigator.vibrate(30);
+    if (type === 'error') window.navigator.vibrate([50, 30, 50]);
+  }, []);
+
+  // --- 2. RELÓGIO & PERSISTÊNCIA ---
+  useEffect(() => {
+    const t = setInterval(() => setHora(new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})), 1000);
+    sessionStorage.setItem('rascunho_rodrigues', JSON.stringify(pedido));
+    return () => clearInterval(t);
+  }, [pedido]);
+
+  // --- 3. FIREBASE SYNC (REALTIME) ---
+  useEffect(() => {
+    const sync = (coll, setter) => onSnapshot(collection(db, coll), (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+        .filter(i => i.disponivel !== false)
+        .sort((a,b) => (a.ordem ?? 999) - (b.ordem ?? 999));
+      setter(data);
+    });
+
+    sync("bases", setBases);
+    sync("acompanhamentos_gratis", setGratis);
+    sync("adicionais", setAdicionais);
+    sync("coberturas", setCoberturas);
+    sync("colheres", setColheres);
+
+    onSnapshot(collection(db, "cardapio_acai"), (s) => {
+      const d = {}; s.docs.forEach(doc => { d[doc.id] = doc.data(); });
+      setRecipientes(d); setLoading(false);
+    });
+  }, []);
+
+  // --- 4. CÁLCULO DE PREÇO DINÂMICO ---
+  useEffect(() => {
+    if (!pedido.tamanho || !recipientes[pedido.tamanho]) return;
+    const pBase = Number(recipientes[pedido.tamanho][pedido.precoChave]) || 0;
+    const pAdds = pedido.adicionais.reduce((acc, a) => acc + (Number(a.preco) * a.qtd), 0);
+    setPedido(prev => ({ ...prev, total: pBase + pAdds }));
+  }, [pedido.tamanho, pedido.adicionais, pedido.precoChave, recipientes]);
+
+  // --- 5. LÓGICA DE NAVEGAÇÃO & VALIDAÇÃO ---
+  const proximaEtapa = () => {
+    if (etapa === 1 && !pedido.base) return triggerError();
+    if (etapa === 2 && !pedido.tamanho) return triggerError();
+    
+    hapticFeedback('medium');
+    setEtapa(prev => prev + 1);
+    mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const triggerError = () => {
+    hapticFeedback('error');
+    setShake(true);
+    setTimeout(() => setShake(false), 500);
+  };
+
+  const toggleItemGratis = (id) => {
+    const limite = recipientes[pedido.tamanho]?.limite || 0;
+    setPedido(prev => {
+      const existe = prev.acompanhamentos.includes(id);
+      if (existe) return { ...prev, acompanhamentos: prev.acompanhamentos.filter(i => i !== id) };
+      if (prev.acompanhamentos.length < limite) {
+        hapticFeedback('light');
+        return { ...prev, acompanhamentos: [...prev.acompanhamentos, id] };
+      }
+      triggerError();
+      return prev;
+    });
+  };
+
+  const mudarAdicional = (item, op) => {
+    vibrar(5);
+    setPedido(p => {
+      const ex = p.adicionais.find(a => a.id === item.id);
+      let novos = op === '+' 
+        ? (ex ? p.adicionais.map(a => a.id === item.id ? {...a, qtd: a.qtd + 1} : a) : [...p.adicionais, {...item, qtd: 1}])
+        : (ex?.qtd > 1 ? p.adicionais.map(a => a.id === item.id ? {...a, qtd: a.qtd - 1} : a) : p.adicionais.filter(a => a.id !== item.id));
+      return { ...p, adicionais: novos };
+    });
+  };
+
+  const finalizarParaCarrinho = (duplicar = false) => {
+    const salvo = localStorage.getItem('carrinho_rodrigues');
+    let cart = salvo ? JSON.parse(salvo) : { itens: [], totalGeral: 0 };
+    
+    const itemFinal = { ...pedido, id: Date.now() };
+    cart.itens.push(itemFinal);
+    
+    if (duplicar) {
+      cart.itens.push({ ...itemFinal, id: Date.now() + 1 });
+    }
+
+    cart.totalGeral = cart.itens.reduce((acc, i) => acc + i.total, 0);
+    localStorage.setItem('carrinho_rodrigues', JSON.stringify(cart));
+    
+    vibrar([30, 100]); // Som de "Checkout"
+    setModalSucesso(true);
+  };
+
+  if (loading) return (
+    <div className="h-screen bg-[#4B0082] flex flex-col items-center justify-center space-y-4">
+      <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }} className="w-16 h-16 border-4 border-[#82C91E] border-t-transparent rounded-full" />
+      <h2 className="text-[#82C91E] font-black italic animate-pulse">SISTEMA RODRIGUES...</h2>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen w-full bg-[#4B0082] flex flex-col items-center overflow-x-hidden font-['Montserrat'] pb-48 body-ultimate">
+      
+      {/* --- ANDROID STATUS BAR --- */}
+      <div className="w-full h-10 px-8 flex justify-between items-center text-white/90 sticky top-0 bg-[#4B0082]/90 backdrop-blur-xl z-[200]">
+        <span className="text-[12px] font-bold">{hora}</span>
+        <div className="flex items-center gap-2">
+          <Lucide.SignalHigh size={14} />
+          <Lucide.Wifi size={14} />
+          <div className="w-7 h-3.5 border border-white/30 rounded-xs p-0.5"><div className="h-full bg-[#82C91E] w-[90%]" /></div>
+        </div>
+      </div>
+
+      {/* --- HEADER COM BARRA DE ÍCONES --- */}
+      <header className="w-[94%] max-w-[480px] bg-white mt-2 p-6 rounded-[3rem] shadow-2xl flex flex-col gap-4 z-50 sticky top-12 border-b-8 border-slate-100">
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-2xl font-[1000] italic text-[#4B0082] uppercase leading-none">Monte Seu Mix</h1>
+            <p className="text-[9px] font-bold text-slate-400 mt-1 uppercase tracking-tighter">Rodrigues Açaí • Etapa {etapa}/7</p>
+          </div>
+          <motion.div key={pedido.total} initial={{ scale: 0.8 }} animate={{ scale: 1 }} className="bg-[#82C91E] px-4 py-2 rounded-xl shadow-lg border-b-4 border-[#6aa318]">
+            <span className="text-black font-[1000] italic text-lg leading-none">R$ {pedido.total.toFixed(2)}</span>
+          </motion.div>
+        </div>
+        
+        {/* PROGRESSO POR ÍCONES (SUGESTÃO 2) */}
+        <div className="flex justify-between px-2 pt-2 border-t border-slate-100">
+          {iconesEtapa.map(({ Icon, label }, idx) => (
+            <div key={idx} className={`p-2 rounded-full transition-all flex flex-col items-center ${etapa > idx ? 'bg-[#4B0082] text-[#82C91E]' : 'bg-slate-100 text-slate-300'}`}>
+              <Icon size={14} />
+              <span className={`text-[6px] font-black uppercase mt-1 ${etapa > idx ? 'text-[#82C91E]' : 'text-slate-400'}`}>{label}</span>
+            </div>
+          ))}
+        </div>
+      </header>
+
+      {/* --- ÁREA DE CONTEÚDO DINÂMICO --- */}
+      <main ref={mainRef} className={`w-full max-w-[500px] px-6 py-8 ${shake ? 'animate-shake' : ''} main-ultimate`}>
+        <AnimatePresence mode="wait">
+          
+          {/* ETAPA 1: BASES */}
+          {etapa === 1 && (
+            <motion.div key="e1" initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -50 }} className="grid grid-cols-2 gap-4">
+              {bases.map(b => (
+                <button key={b.id} onClick={() => { hapticFeedback(); setPedido({...pedido, base: b.id, baseNome: b.nome, baseCat: b.cat, precoChave: b.cat || b.nome, foto: b.imagem_url}); proximaEtapa(); }}
+                  className={`relative h-64 rounded-[3.5rem] overflow-hidden border-4 transition-all bg-white ${pedido.base === b.id ? 'border-[#82C91E] scale-105 shadow-2xl' : 'border-transparent shadow-lg'}`}>
+                  <img src={b.imagem_url} alt={b.nome} className="w-full h-full object-cover" loading="lazy" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#4B0082] via-transparent to-transparent" />
+                  <span className="absolute bottom-6 left-0 right-0 text-white font-[1000] italic uppercase text-[10px] text-center px-4 leading-tight">{b.nome}</span>
+                </button>
+              ))}
+            </motion.div>
+          )}
+
+          {/* ETAPA 2: TAMANHOS (DESIGN DA FOTO) */}
+          {etapa === 2 && (
+            <motion.div key="e2" initial={{ opacity: 0, x: 50 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -50 }} className="space-y-4">
+              {Object.keys(recipientes).sort((a,b) => (recipientes[a].ordem ?? 999) - (recipientes[b].ordem ?? 999)).map(t => (
+                <button key={t} onClick={() => { hapticFeedback(); setPedido({...pedido, tamanho: t}); proximaEtapa(); }}
+                  className={`w-full p-8 rounded-[3.5rem] flex justify-between items-center border-4 transition-all bg-white ${pedido.tamanho === t ? 'border-[#82C91E] bg-[#82C91E]/5 shadow-xl' : 'border-transparent shadow-md'}`}>
+                  <div className="flex items-center gap-6 text-left">
+                    <Lucide.CupSoda size={40} className={pedido.tamanho === t ? 'text-[#82C91E]' : 'text-slate-300'} />
+                    <div>
+                      <p className="text-2xl font-[1000] italic text-[#4B0082] uppercase">{t}</p>
+                      <p className="text-[10px] font-bold text-slate-400">Limite: {recipientes[t].limite} Grátis • {recipientes[t].limite_coberturas} Caldas</p>
+                    </div>
+                  </div>
+                  <span className="text-xl font-black text-black">R$ {Number(recipientes[t][pedido.precoChave]).toFixed(2)}</span>
+                </button>
+              ))}
+            </motion.div>
+          )}
+
+          {/* ETAPA 3: GRÁTIS */}
+          {etapa === 3 && (
+            <motion.div key="e3" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-3 gap-3">
+              <div className="col-span-3 text-center mb-4"><p className="text-[#82C91E] font-black text-xs uppercase italic">Selecione {pedido.acompanhamentos.length} de {recipientes[pedido.tamanho]?.limite}</p></div>
+              {gratis.map(item => (
+                <button key={item.id} onClick={() => toggleItemGratis(item.id)}
+                  className={`relative h-36 rounded-[2.5rem] overflow-hidden border-4 transition-all ${pedido.acompanhamentos.includes(item.id) ? 'border-[#82C91E] scale-105' : 'border-transparent bg-white shadow-md'}`}>
+                  <img src={item.imagem_url} alt={item.nome} className="w-full h-full object-cover" />
+                  {pedido.acompanhamentos.includes(item.id) && <div className="absolute inset-0 bg-[#82C91E]/40 flex items-center justify-center"><Lucide.Check className="text-black" strokeWidth={6} /></div>}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent" />
+                  <p className="absolute bottom-2 w-full text-[8px] font-black text-white text-center uppercase px-1 leading-none">{item.nome}</p>
+                </button>
+              ))}
+            </motion.div>
+          )}
+
+          {/* ETAPA 5: ADICIONAIS PAGOS (DESIGN MELHORADO) */}
+          {etapa === 5 && (
+            <motion.div key="e5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+              {adicionais.map(item => {
+                const qtd = pedido.adicionais.find(a => a.id === item.id)?.qtd || 0;
+                return (
+                  <div key={item.id} className="bg-white p-4 rounded-[2.8rem] flex items-center justify-between shadow-lg border-b-4 border-slate-100">
+                    <div className="flex items-center gap-4">
+                      <img src={item.imagem_url} className="w-16 h-16 rounded-[1.5rem] object-cover" alt={item.nome} />
+                      <div>
+                        <p className="text-[11px] font-black uppercase text-[#4B0082] italic leading-tight">{item.nome}</p>
+                        <p className="text-[#82C91E] font-black text-[10px] mt-1 italic">R$ {Number(item.preco).toFixed(2)}</p>
+                      </div>
+                    </div>
+                    {/* CONTADOR AJUSTADO PARA LEITURA FÁCIL (SUGESTÃO 8) */}
+                    <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-3xl">
+                      <button onClick={() => mudarAdicional(item, '-')} className="w-10 h-10 bg-white rounded-2xl flex items-center justify-center text-[#4B0082] shadow-sm active:scale-90"><Lucide.Minus size={18} strokeWidth={4} /></button>
+                      <span className="w-8 text-center font-[1000] text-xl text-[#4B0082]">{qtd}</span>
+                      <button onClick={() => mudarAdicional(item, '+')} className="w-10 h-10 bg-[#82C91E] rounded-2xl flex items-center justify-center text-black shadow-sm active:scale-90"><Lucide.Plus size={18} strokeWidth={4} /></button>
+                    </div>
+                  </div>
+                );
+              })}
+            </motion.div>
+          )}
+
+          {/* ETAPA 7: ETIQUETA REALISTA */}
+          {etapa === 7 && (
+            <motion.div key="e7" initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="flex flex-col items-center gap-10">
+              
+              {/* O COPO DE ISOPOR (VISUAL DA IMAGEM DA SACOLINHA) */}
+              <div className="relative w-64 h-80 bg-white rounded-b-[6rem] rounded-t-3xl shadow-[0_60px_120px_rgba(0,0,0,0.8)] border-x-[18px] border-slate-50 flex items-center justify-center overflow-hidden">
+                <div className="absolute inset-0 opacity-5 bg-[url('https://www.transparenttextures.com/patterns/snow.png')]" />
+                
+                {/* ETIQUETA SERRILHADA (REFERÊNCIA FIEL) */}
+                <motion.div initial={{ rotate: 0 }} animate={{ rotate: -5 }} className="bg-white w-48 h-32 border-[5px] border-[#ff2b2b] rounded-sm shadow-2xl p-4 flex flex-col justify-center items-center relative">
+                  <div className="absolute -top-1 left-0 w-full flex justify-around">
+                    {[...Array(12)].map((_,i) => <div key={i} className="w-2.5 h-2.5 bg-[#ff2b2b] rounded-full -mt-1.5" />)}
+                  </div>
+                  <div className="absolute -bottom-1 left-0 w-full flex justify-around">
+                    {[...Array(12)].map((_,i) => <div key={i} className="w-2.5 h-2.5 bg-[#ff2b2b] rounded-full -mb-1.5" />)}
+                  </div>
+                  <span className="text-4xl text-[#0038a8] font-bold text-center uppercase tracking-tighter leading-none" style={{ fontFamily: '"Permanent Marker", cursive' }}>
+                    {pedido.nomePersonalizado || "RODRIGUES"}
+                  </span>
+                </motion.div>
+              </div>
+
+              {/* DASHBOARD INPUT (SUGESTÃO 5) */}
+              <div className="bg-white p-10 rounded-[4.5rem] shadow-2xl w-full border-b-[12px] border-slate-100 flex flex-col items-center gap-6">
+                <input autoFocus type="text" value={pedido.nomePersonalizado} onChange={(e) => { hapticFeedback('light'); setPedido({...pedido, nomePersonalizado: e.target.value.toUpperCase()}) }}
+                  placeholder="NOME DO CLIENTE..." className="w-full bg-slate-50 border-4 border-slate-100 rounded-[2.5rem] h-20 px-8 text-[#4B0082] font-[1000] italic outline-none focus:border-[#82C91E] text-center text-2xl" />
+                <p className="text-[9px] text-slate-400 font-bold uppercase">Este nome será impresso na etiqueta</p>
+              </div>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </main>
+
+      {/* FOOTER NAVEGAÇÃO ANDROID */}
+      <footer className="fixed bottom-10 left-1/2 -translate-x-1/2 w-[92%] max-w-[450px] h-20 flex gap-4 z-[1000]">
+        {etapa > 1 && (
+          <button onClick={() => { hapticFeedback(); setEtapa(etapa - 1) }} className="w-24 h-full bg-white rounded-[2.5rem] shadow-2xl flex items-center justify-center text-[#4B0082] active:scale-90 border-b-8 border-slate-200">
+            <Lucide.ChevronLeft size={36} strokeWidth={4} />
+          </button>
+        )}
+        <button onClick={() => { hapticFeedback(20); etapa === 7 ? finalizarParaCarrinho() : setEtapa(etapa + 1) }}
+          disabled={(etapa === 1 && !pedido.base) || (etapa === 2 && !pedido.tamanho) || (etapa === 7 && !pedido.nomePersonalizado)}
+          className="flex-1 h-full bg-[#82C91E] text-black rounded-[2.5rem] shadow-2xl font-[1000] uppercase italic text-xl flex items-center justify-center gap-3 active:scale-95 border-b-8 border-[#6aa318] disabled:opacity-50"
+        >
+          {etapa === 7 ? 'Selo de Qualidade' : 'Próximo'}
+          <Lucide.Zap size={22} fill="black" />
+        </button>
+      </footer>
+
+      {/* BARRA DE GESTOS ANDROID */}
+      <div className="fixed bottom-3 left-1/2 -translate-x-1/2 w-36 h-2 bg-white/10 rounded-full z-[1000]" />
+
+      {/* --- MODAL SUCESSO PREMIUM (SUGESTÕES 11 & 16) --- */}
+      <AnimatePresence>
+        {modalSucesso && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 z-[3000] bg-black/95 backdrop-blur-xl flex items-center justify-center p-8 text-center">
+            <div className="bg-white w-full max-w-sm rounded-[5rem] p-10 border-b-[15px] border-[#82C91E]">
+              <div className="w-24 h-24 bg-[#82C91E] rounded-[2.5rem] flex items-center justify-center mx-auto mb-8 rotate-12 shadow-xl"><Lucide.Check size={48} className="text-black" strokeWidth={5} /></div>
+              <h2 className="text-3xl font-[1000] italic text-[#4B0082] uppercase mb-10 leading-none">Carga Concluída!</h2>
+              <button onClick={() => navigate('/carrinho')} className="w-full bg-[#4B0082] text-white py-7 rounded-[2.5rem] font-black uppercase italic shadow-2xl">Finalizar Pedido</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <style>{`
+        @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }
+        .animate-shake { animation: shake 0.2s ease-in-out 0s 2; }
+        ::-webkit-scrollbar { display: none; }
+        .body-ultimate { margin: 0; padding: 0; background-color: #4B0082; }
+        .main-ultimate { padding-bottom: 200px; }
+      `}</style>
+    </div>
+  );
+}

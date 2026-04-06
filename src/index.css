@@ -1,44 +1,54 @@
+/* 1. Importação da Fonte (Deve ser a primeira linha) */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap');
 @import "tailwindcss";
 
-@theme {
-  @keyframes marquee {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
+/* 2. Definição de Variáveis e Fonte Base */
+:root {
+  /* Corrigido: Variáveis agora dentro do :root */
+  --purple-dark: #1F0137;
+  --purple-light: #4B0082;
+  
+  /* Força a fonte no motor de renderização do navegador */
+  font-family: 'Montserrat', sans-serif !important;
 }
 
-@layer base {
-  html, body {
-    background-color: #0b0e13 !important; /* Fundo idêntico ao Coins.game */
-    color: #ffffff;
-    font-family: 'Inter', sans-serif;
-    margin: 0 !important;
-    padding: 0 !important;
-    overflow-x: hidden;
-    width: 100% !important;
-    min-height: 100vh;
-  }
-
-  #root {
-    width: 100% !important;
-    max-width: 100% !important;
-    margin: 0 !important;
-  }
+/* 3. Reset Global "Nuclear" (Garante que nada escape, nem no mobile) */
+* {
+  font-family: 'Montserrat', sans-serif !important;
 }
 
-@layer utilities {
-  .glass-header {
-    background: rgba(11, 14, 19, 0.85);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  }
-  .glass-nav {
-    background: rgba(22, 25, 34, 0.95);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-  .animate-marquee {
-    display: inline-flex;
-    animation: marquee 35s linear infinite;
-  }
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Montserrat', sans-serif !important;
+  color: white; 
+  background-color: var(--purple-dark); /* Aplica o roxo de fundo globalmente */
+  
+  /* Melhora a nitidez da fonte */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+
+  /* Proteção contra scrolls indesejados no Android/iOS */
+  overscroll-behavior: none; 
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Fix para áreas com scroll */
+.scroll-fix {
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Remove scrollbar no mobile */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

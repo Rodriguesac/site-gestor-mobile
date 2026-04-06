@@ -1,282 +1,399 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import * as Lucide from 'lucide-react';
-import { db, auth } from "../services/firebase";
-import { 
-  collection, 
-  query, 
-  doc, 
-  setDoc, 
-  deleteDoc, 
-  onSnapshot, 
-  orderBy 
-} from 'firebase/firestore';
+import { MapContainer, TileLayer, useMapEvents, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { db, auth } from "../services/firebase";
+import { collection, query, orderBy, onSnapshot, doc, addDoc, serverTimestamp } from 'firebase/firestore';
 
 const STORE_COORDS = [-20.43131, -54.55412];
-const PRIMARY_COLOR = '#82C91E';
+const TOMTOM_KEY = 'tmsKTjnNOPUHNDHOYh2m12VrmwejmK8t'; 
+const TAGS_RAPIDAS = ["Deixar na portaria", "Não tocar campainha", "Ligar ao chegar", "Cuidado com o cão"];
 
-// Adicionado Props: isOpen e onClose
+function MapCenterEvents({ onMoveEnd }) {
+  const map = useMapEvents({ moveend: () => { const center = map.getCenter(); onMoveEnd(center.lat, center.lng); } });
+  return null;
+}
+
+function RecenterMap({ coords }) {
+    const map = useMap();
+    useEffect(() => { if (coords && coords.length === 2) map.flyTo(coords, 17, { animate: true, duration: 1.5 }); }, [coords, map]);
+    return null;
+}
+
+const calcularDistanciaHaversine = (lat1, lon1, lat2, lon2) => {
+    const R = 6371; const dLat = (lat2 - lat1) * (Math.PI / 180); const dLon = (lon2 - lon1) * (Math.PI / 180);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return parseFloat((R * c).toFixed(2)); // Retorna número puro
+};
+
 export default function ModalEndereco({ isOpen, onClose }) {
-  const mapRef = useRef(null);
-  const mapInstance = useRef(null);
-  const clientMarker = useRef(null);
-  const routeLayer = useRef(null);
+  const numeroInputRef = useRef(null);
   
-  const [enderecos, setEnderecos] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // --- A REGRA DO REI (PAINEL LOGÍSTICA) ---
+  const [configLogistica, setConfigLogistica] = useState(null);
+  
+  // --- ESTADOS ---
+  const [etapa, setEtapa] = useState('BUSCA'); 
   const [busca, setBusca] = useState('');
   const [sugestoes, setSugestoes] = useState([]);
+  const [showSugestoes, setShowSugestoes] = useState(false);
+  const [enderecosSalvos, setEnderecosSalvos] = useState([]);
+  const [buscando, setBuscando] = useState(false);
+  const [calculandoLogistica, setCalculandoLogistica] = useState(false);
+  const [salvando, setSalvando] = useState(false); 
   
-  const [numero, setNumero] = useState('');
-  const [bairro, setBairro] = useState('');
+  const [rotaCoords, setRotaCoords] = useState([]);
+  const [mapCenter, setMapCenter] = useState(STORE_COORDS);
+  
+  const [dados, setDados] = useState({ 
+      rua: '', numero: '', bairro: '', cep: '', latlng: null 
+  });
+  
+  // Valores numéricos puros para não dar erro no Carrinho/Checkout
+  const [kmCalculado, setKmCalculado] = useState(null);
+  const [taxaCalculada, setTaxaCalculada] = useState(null);
+
   const [complemento, setComplemento] = useState('');
   const [tipoLocal, setTipoLocal] = useState('Casa');
-  const [enderecoCliente, setEnderecoCliente] = useState({ endereco: '', taxa: '0,00', km: '0.00', latlng: null });
-  const [configLogistica, setConfigLogistica] = useState({ taxaBase: 0, valorPorKm: 1.5 });
-  const [tentouSalvar, setTentouSalvar] = useState(false);
+  const [precisaConfirmarNumero, setPrecisaConfirmarNumero] = useState(false);
 
-  // Carregar Regras e Histórico (Mantido igual)
+  // 1. ESCUTA O PAINEL LOGÍSTICA
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = onSnapshot(doc(db, "config", "logistica"), (snap) => {
+    const unsub = onSnapshot(doc(db, "configuracoes_loja", "logistica"), (snap) => {
       if (snap.exists()) setConfigLogistica(snap.data());
     });
     return () => unsub();
   }, [isOpen]);
 
-  const carregarHistorico = useCallback(() => {
-    if (!auth.currentUser) return;
-    const q = query(collection(db, "usuarios", auth.currentUser.uid, "meus_enderecos"), orderBy("id", "desc"));
-    return onSnapshot(q, (snap) => {
-      setEnderecos(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      setLoading(false);
+  // 2. CARREGA ENDEREÇOS DO CLIENTE
+  useEffect(() => {
+    if (!isOpen || !auth.currentUser) return;
+    const unsub = onSnapshot(query(collection(db, "usuarios", auth.currentUser.uid, "meus_enderecos"), orderBy("createdAt", "desc")), (snap) => {
+        setEnderecosSalvos(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
-  }, []);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    let unsub;
-    const interval = setInterval(() => {
-      if (auth.currentUser) {
-        unsub = carregarHistorico();
-        clearInterval(interval);
-      }
-    }, 500);
-    return () => { if (unsub) unsub(); clearInterval(interval); };
-  }, [carregarHistorico, isOpen]);
-
-  const processarLocal = async (lat, lng, label) => {
-    setSugestoes([]); 
-    setTentouSalvar(false);
-    const logradouro = label.split(',')[0];
-    setBusca(logradouro);
-    const partes = label.split(',');
-    if (partes.length > 1) setBairro(partes[1].trim());
-
-    if (mapInstance.current) {
-      const clientIcon = L.divIcon({
-        className: 'user-marker',
-        html: `<div class="relative flex flex-col items-center">
-                  <span class="bg-[#0b0e13] text-[#82C91E] text-[8px] font-black px-2 py-1 rounded-full border border-[#82C91E]/50 shadow-lg uppercase mb-1">VOCÊ</span>
-                  <div class="w-5 h-5 bg-[#82C91E] rounded-full border-2 border-white shadow-[0_0_15px_#82C91E]"></div>
-               </div>`,
-        iconSize: [60, 60], iconAnchor: [30, 50]
-      });
-
-      if (clientMarker.current) clientMarker.current.setLatLng([lat, lng]);
-      else clientMarker.current = L.marker([lat, lng], { icon: clientIcon }).addTo(mapInstance.current);
-
-      try {
-        const resR = await fetch(`https://router.project-osrm.org/route/v1/driving/${STORE_COORDS[1]},${STORE_COORDS[0]};${lng},${lat}?overview=full&geometries=geojson`);
-        const dataR = await resR.json();
-        if (dataR.routes?.length > 0) {
-          const r = dataR.routes[0];
-          const km = (r.distance / 1000).toFixed(2);
-          const taxaVal = (configLogistica.taxaBase + (parseFloat(km) * configLogistica.valorPorKm));
-          setEnderecoCliente({
-            endereco: label,
-            km,
-            taxa: taxaVal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-            latlng: { lat, lng }
-          });
-          if (routeLayer.current) mapInstance.current.removeLayer(routeLayer.current);
-          routeLayer.current = L.geoJSON(r.geometry, { style: { color: PRIMARY_COLOR, weight: 6, opacity: 0.8, lineCap: 'round' } }).addTo(mapInstance.current);
-          mapInstance.current.fitBounds(routeLayer.current.getBounds(), { padding: [50, 50] });
-        }
-      } catch (e) { console.error(e); }
-    }
-  };
-
-  // Inicialização do Mapa ajustada para Modal
-  useEffect(() => {
-    if (isOpen && !mapInstance.current && mapRef.current) {
-      setTimeout(() => { // Timeout para garantir que o container do modal já tenha tamanho
-        mapInstance.current = L.map(mapRef.current, { zoomControl: false, attributionControl: false }).setView(STORE_COORDS, 15);
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(mapInstance.current);
-        
-        const storeIcon = L.divIcon({
-          className: 'store-icon',
-          html: `<div class="bg-white p-1 rounded-full border-2 border-[#82C91E] shadow-lg flex items-center justify-center overflow-hidden">
-                    <img src="https://i.ibb.co/9Ly63D3/Chat-GPT-Image-30-de-dez-de-2025-20-07-39.png" class="w-7 h-7 object-contain" />
-                 </div>`,
-          iconSize: [40, 40]
-        });
-        L.marker(STORE_COORDS, { icon: storeIcon }).addTo(mapInstance.current);
-
-        mapInstance.current.on('click', async (e) => {
-          const { lat, lng } = e.latlng;
-          const res = await fetch(`https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?f=json&location=${lng},${lat}`);
-          const data = await res.json();
-          processarLocal(lat, lng, data.address?.Address || "Local selecionado");
-        });
-        mapInstance.current.invalidateSize();
-      }, 300);
-    }
-    return () => {
-        if (mapInstance.current) {
-            mapInstance.current.remove();
-            mapInstance.current = null;
-        }
-    }
+    return () => unsub();
   }, [isOpen]);
 
-  // Autocomplete e Salvar (Mantidos com onClose)
-  useEffect(() => {
-    if (busca.length < 5) { setSugestoes([]); return; }
-    const t = setTimeout(async () => {
-      if (enderecoCliente.endereco.split(',')[0] === busca) return;
-      const res = await fetch(`https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&singleLine=${encodeURIComponent(busca + ", Campo Grande, MS")}&maxLocations=5`);
-      const data = await res.json();
-      setSugestoes(data.candidates || []);
-    }, 400);
-    return () => clearTimeout(t);
-  }, [busca, enderecoCliente.endereco]);
-
-  const salvarEndereco = async () => {
-    if (!auth.currentUser || !numero || !bairro) { setTentouSalvar(true); setTimeout(() => setTentouSalvar(false), 1000); return; }
-    const id = Date.now().toString();
-    const finalData = { ...enderecoCliente, numero, complemento, bairro, tipo: tipoLocal, id };
-    await setDoc(doc(db, "usuarios", auth.currentUser.uid, "meus_enderecos", id), finalData);
-    localStorage.setItem('endereco_rodrigues', JSON.stringify(finalData));
-    window.dispatchEvent(new Event('enderecoAtualizado'));
-    onClose(); // Fecha o modal após salvar
+  const extrairNumeroDaBusca = (texto) => {
+    const match = texto.match(/(?:,\s*|\s+)(\d+)(?:\s*|-*[a-zA-Z])?$/);
+    return match ? match[1] : '';
   };
 
-  const selecionarEndereco = (end) => {
-    localStorage.setItem('endereco_rodrigues', JSON.stringify(end));
-    window.dispatchEvent(new Event('enderecoAtualizado'));
-    onClose(); // Fecha o modal após selecionar
+  // BUSCA TOMTOM DEBOUNCE
+  useEffect(() => {
+    if (busca.trim().length < 3) { setSugestoes([]); setShowSugestoes(false); return; }
+    const timer = setTimeout(async () => {
+      if (etapa === 'BUSCA') {
+        try {
+          const res = await fetch(`https://api.tomtom.com/search/2/search/${encodeURIComponent(busca)}.json?key=${TOMTOM_KEY}&countrySet=BR&lat=${STORE_COORDS[0]}&lon=${STORE_COORDS[1]}&radius=30000&limit=5&typeahead=true`);
+          const data = await res.json();
+          if (data.results?.length > 0) {
+              setSugestoes(data.results.filter(item => item.address?.municipality === 'Campo Grande' || item.address?.localName === 'Campo Grande'));
+              setShowSugestoes(true);
+          } else setShowSugestoes(false);
+        } catch (e) { console.error(e); }
+      }
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [busca, etapa]);
+
+  // ============================================================================
+  // O CÉREBRO: MEDE A DISTÂNCIA E PERGUNTA O PREÇO À TABELA LOGÍSTICA
+  // ============================================================================
+  const processarLocalizacaoCentral = async (lat, lng, numeroPreservado = null) => {
+      setCalculandoLogistica(true);
+      setDados(prev => ({ ...prev, latlng: { lat, lng } }));
+
+      let kmFinal = 0;
+      let rotaVisual = [];
+
+      // 1. MEDE O KM
+      try {
+        const resRota = await fetch(`https://router.project-osrm.org/route/v1/driving/${STORE_COORDS[1]},${STORE_COORDS[0]};${lng},${lat}?overview=full&geometries=geojson`);
+        const dataRota = await resRota.json();
+        if (dataRota.routes?.length > 0) {
+          kmFinal = dataRota.routes[0].distance / 1000;
+          rotaVisual = dataRota.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        } else throw new Error();
+      } catch (e) { 
+        kmFinal = calcularDistanciaHaversine(STORE_COORDS[0], STORE_COORDS[1], lat, lng);
+        rotaVisual = [[STORE_COORDS[0], STORE_COORDS[1]], [lat, lng]]; 
+      }
+
+      setRotaCoords(rotaVisual);
+      setKmCalculado(kmFinal);
+
+      // 2. BUSCA O NOME DA RUA
+      try {
+          const geoRes = await fetch(`https://api.tomtom.com/search/2/reverseGeocode/${lat},${lng}.json?key=${TOMTOM_KEY}&radius=100`);
+          const geoData = await geoRes.json();
+          if (geoData.addresses?.length > 0) {
+              const addr = geoData.addresses[0].address;
+              const numFinal = numeroPreservado || addr.streetNumber || '';
+              setDados(prev => ({
+                  ...prev,
+                  rua: (addr.streetName || addr.route || '').toUpperCase(), 
+                  numero: numFinal,
+                  bairro: (addr.municipalitySubdivision || '').toUpperCase(),
+                  cep: addr.postalCode || "79000-000",
+              }));
+              if (!numFinal) setPrecisaConfirmarNumero(true);
+          }
+      } catch(e) {}
+
+      setCalculandoLogistica(false);
+  };
+
+  // 3. CALCULA A TAXA ASSIM QUE O KM OU A TABELA ATUALIZAM
+  useEffect(() => {
+      if (kmCalculado !== null && configLogistica) {
+          let valorTaxa = 0;
+          if (configLogistica.tabelaTaxas?.length > 0) {
+              const regraAplicada = configLogistica.tabelaTaxas.find(r => kmCalculado <= r.distanciaKm);
+              if (regraAplicada) {
+                  valorTaxa = regraAplicada.valor;
+              } else {
+                  const ultimaRegra = configLogistica.tabelaTaxas[configLogistica.tabelaTaxas.length - 1];
+                  const kmExtra = kmCalculado - ultimaRegra.distanciaKm;
+                  valorTaxa = ultimaRegra.valor + (kmExtra * (configLogistica.valorKmAdicional || 0));
+              }
+          } else {
+              valorTaxa = 6.00; // Default caso não haja tabela
+          }
+          setTaxaCalculada(valorTaxa);
+      }
+  }, [kmCalculado, configLogistica]);
+
+  // --- AÇÕES ---
+  const selecionarSugestao = async (sug) => {
+    setBuscando(true); setShowSugestoes(false);
+    const numeroDigitado = sug.address?.streetNumber || extrairNumeroDaBusca(busca);
+    
+    setDados(prev => ({
+        ...prev, rua: (sug.address?.streetName || sug.address?.freeformAddress || '').toUpperCase(),
+        numero: numeroDigitado, bairro: (sug.address?.municipalitySubdivision || '').toUpperCase(),
+        cep: '', latlng: { lat: sug.position.lat, lng: sug.position.lon }
+    }));
+    setMapCenter([sug.position.lat, sug.position.lon]);
+    setEtapa('MAPA');
+    await processarLocalizacaoCentral(sug.position.lat, sug.position.lon, numeroDigitado);
+    setBuscando(false);
+  };
+
+  const usarGPS = () => {
+      setBuscandoGps(true);
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+          setMapCenter([pos.coords.latitude, pos.coords.longitude]);
+          setEtapa('MAPA');
+          await processarLocalizacaoCentral(pos.coords.latitude, pos.coords.longitude);
+          setBuscandoGps(false);
+      }, () => { alert("Erro no GPS. Digite o endereço."); setBuscandoGps(false); }, { enableHighAccuracy: true });
+  };
+
+  const usarSalvo = (end) => {
+    setDados({ rua: end.rua, numero: end.numero, bairro: end.bairro, cep: end.cep, latlng: end.latlng });
+    setComplemento(end.complemento || ''); setTipoLocal(end.tipo || 'Casa');
+    setMapCenter([end.latlng.lat, end.latlng.lng]);
+    setEtapa('MAPA');
+    processarLocalizacaoCentral(end.latlng.lat, end.latlng.lng, end.numero);
+  };
+
+  const adicionarTag = (tag) => setComplemento(prev => prev ? prev + ", " + tag : tag);
+
+  const validarCoordenadasFinais = async (texto) => {
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(texto + ', Campo Grande, MS, Brasil')}&limit=1`);
+      const data = await res.json();
+      if (data?.length > 0) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    } catch (e) {} return null;
+  };
+
+  // 4. GUARDA O VALOR NUMÉRICO PURO!
+  const confirmarEndereco = async () => {
+      if (!dados.rua || !dados.numero) { setPrecisaConfirmarNumero(true); numeroInputRef.current?.focus(); return alert("Informe o número."); }
+      
+      setSalvando(true);
+      try {
+        const coordsFinais = await validarCoordenadasFinais(`${dados.rua}, ${dados.numero}, ${dados.bairro}`);
+        const latFinal = coordsFinais?.lat || dados.latlng?.lat || STORE_COORDS[0];
+        const lngFinal = coordsFinais?.lng || dados.latlng?.lng || STORE_COORDS[1];
+
+        // GUARDA TAXA COMO NÚMERO
+        const payloadBase = { 
+            ...dados, 
+            lat: latFinal, lng: lngFinal, latlng: { lat: latFinal, lng: lngFinal }, 
+            complemento, tipo: tipoLocal,
+            km: kmCalculado || 0,
+            taxa: taxaCalculada || 0 // NUMBER PURO!
+        };
+        
+        if (auth.currentUser) {
+            await addDoc(collection(db, "usuarios", auth.currentUser.uid, "meus_enderecos"), { ...payloadBase, createdAt: serverTimestamp() });
+        }
+
+        localStorage.setItem('endereco_rodrigues', JSON.stringify({ ...payloadBase, createdAt: new Date().toISOString() }));
+        window.dispatchEvent(new Event('enderecoAtualizado'));
+        onClose();
+      } catch (err) { alert("Erro ao salvar endereço."); } finally { setSalvando(false); }
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-300">
-      
-      <div className="bg-[#0b0e13] w-full max-w-lg h-[90vh] sm:h-[85vh] sm:rounded-[3rem] rounded-t-[3rem] overflow-hidden flex flex-col shadow-2xl border-t border-white/5 relative animate-in slide-in-from-bottom duration-500">
+    <div className="fixed inset-0 z-[5000] flex items-end sm:items-center justify-center sm:p-4 backdrop-blur-sm bg-black/60 selection:bg-[#82C91E]/30">
+      <div className="w-full max-w-md bg-white sm:rounded-[3rem] rounded-t-[3rem] shadow-2xl overflow-hidden h-[95vh] sm:h-[90vh] flex flex-col animate-in slide-in-from-bottom-10">
         
-        {/* Header do Modal com botão fechar */}
-        <section className="relative h-[25vh] w-full shrink-0 overflow-hidden">
-          <div ref={mapRef} className="w-full h-full" />
-          <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-[#0b0e13] pointer-events-none" />
-          
-          <button onClick={onClose} className="absolute top-6 right-6 z-[1000] bg-[#161922]/90 backdrop-blur-md p-3 rounded-xl border border-white/10 text-white shadow-2xl active:scale-90 transition-all">
-            <Lucide.X size={20} />
-          </button>
+        {etapa === 'BUSCA' && (
+            <div className="flex flex-col h-full bg-white">
+                <div className="p-6 pb-4 flex justify-between items-center border-b border-slate-100">
+                  <h2 className="text-[#4B0082] font-[1000] italic uppercase text-lg leading-none">Onde entregar?</h2>
+                  <button onClick={onClose} className="p-2 bg-slate-50 rounded-full text-slate-400 hover:text-red-500 transition-colors"><Lucide.X size={20} /></button>
+                </div>
 
-          <div className="absolute bottom-4 left-6 right-6 z-[1000]">
-            <h1 className="text-white text-xl font-[1000] italic uppercase tracking-tighter leading-none">
-              Onde <span className="text-[#82C91E]">Entregar?</span>
-            </h1>
-          </div>
-        </section>
+                <div className="p-6 flex-1 overflow-y-auto space-y-5 custom-scrollbar relative">
+                    <div className="flex bg-slate-50 rounded-2xl border border-slate-200 focus-within:border-[#EA1D2C] focus-within:bg-white shadow-sm p-1.5 items-center transition-all relative z-50">
+                         <Lucide.Search size={20} className="text-[#EA1D2C] ml-3" />
+                         <input value={busca} onChange={e => setBusca(e.target.value)} className="flex-1 bg-transparent p-3 text-slate-800 font-bold text-sm outline-none placeholder:text-slate-400" placeholder="Rua e número, bairro" autoFocus />
+                         {busca && !buscando && <button onClick={() => {setBusca(''); setShowSugestoes(false);}} className="mr-3 text-slate-400"><Lucide.XCircle size={18} /></button>}
+                    </div>
 
-        {/* Busca */}
-        <div className="px-6 -mt-4 relative z-[1001] shrink-0">
-          <div className="bg-[#161922] p-1 rounded-[2rem] border border-white/5 flex items-center gap-3 px-5 h-14 shadow-2xl shadow-black/50">
-            <Lucide.Search size={18} className="text-[#82C91E] shrink-0" />
-            <input 
-              value={busca} 
-              onChange={e => setBusca(e.target.value)}
-              placeholder="PROCURAR ENDEREÇO..."
-              className="bg-transparent outline-none w-full font-black text-white uppercase italic text-[11px] placeholder:text-zinc-700"
-            />
-          </div>
+                    <AnimatePresence>
+                        {showSugestoes && sugestoes.length > 0 && (
+                            <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden relative z-40 -mt-2">
+                                {sugestoes.map((sug, i) => (
+                                    <button key={i} onClick={() => selecionarSugestao(sug)} className="w-full text-left p-4 border-b border-slate-50 hover:bg-[#82C91E]/10 flex items-center gap-3 transition-colors">
+                                        <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0"><Lucide.MapPin size={14} className="text-[#4B0082]" /></div>
+                                        <div className="flex-1 overflow-hidden">
+                                            <p className="text-[12px] font-[1000] text-[#4B0082] truncate">{sug.address?.streetName || sug.address?.freeformAddress}</p>
+                                            <p className="text-[10px] font-bold text-slate-400 uppercase truncate mt-0.5">{sug.address?.municipalitySubdivision || 'Campo Grande'}, MS</p>
+                                        </div>
+                                    </button>
+                                ))}
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
 
-          {sugestoes.length > 0 && (
-            <div className="absolute left-6 right-6 mt-2 bg-[#161922] rounded-3xl border border-[#82C91E]/20 shadow-2xl z-[2000] overflow-hidden backdrop-blur-xl">
-              {sugestoes.map((s, i) => (
-                <button key={i} onClick={() => processarLocal(s.location.y, s.location.x, s.address)} className="w-full p-4 text-left border-b border-white/5 hover:bg-[#82C91E]/5 transition-all flex items-start gap-4">
-                  <div className="mt-1 text-[#82C91E]"><Lucide.MapPin size={14} /></div>
-                  <div>
-                    <p className="text-[10px] font-black text-white uppercase italic leading-tight">{s.address.split(',')[0]}</p>
-                    <p className="text-[8px] font-bold text-zinc-500 uppercase italic mt-0.5">{s.address.split(',').slice(1).join(',')}</p>
-                  </div>
+                    {!busca && (
+                        <button onClick={usarGPS} disabled={buscandoGps} className="w-full text-left py-3 flex items-center gap-4 hover:opacity-70 transition-all border-b border-slate-100 pb-5">
+                            <Lucide.Crosshair size={22} className={`text-[#4B0082] ${buscandoGps ? 'animate-spin' : ''}`} />
+                            <span className="text-sm font-bold text-[#4B0082]">Usar minha localização atual</span>
+                        </button>
+                    )}
+
+                    {!busca && enderecosSalvos.length > 0 && (
+                        <div className="space-y-2 pt-2">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-2 mb-2">Endereços Salvos</p>
+                            {enderecosSalvos.map(end => (
+                                <button key={end.id} onClick={() => usarSalvo(end)} className="w-full text-left p-4 bg-white border border-slate-100 rounded-2xl flex items-center gap-4 shadow-sm hover:border-[#EA1D2C] transition-all">
+                                    <div className="p-2.5 rounded-full text-slate-500 bg-slate-50">
+                                        {end.tipo === 'Casa' ? <Lucide.Home size={18}/> : end.tipo === 'Trabalho' ? <Lucide.Briefcase size={18}/> : <Lucide.MapPin size={18}/>}
+                                    </div>
+                                    <div className="flex-1 text-left min-w-0">
+                                        <p className="text-sm font-bold text-slate-800 truncate">{end.rua}, {end.numero}</p>
+                                        <p className="text-[11px] text-slate-500 truncate mt-0.5">{end.bairro} • {end.complemento || end.tipo}</p>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        )}
+
+        {etapa === 'MAPA' && (
+            <div className="flex flex-col h-full bg-white relative">
+                <button onClick={() => setEtapa('BUSCA')} className="absolute top-4 left-4 z-[500] p-3 bg-white shadow-lg rounded-full text-[#EA1D2C] hover:bg-slate-50 transition-all active:scale-95">
+                    <Lucide.ChevronLeft size={24} />
                 </button>
-              ))}
-            </div>
-          )}
-        </div>
 
-        {/* Listagem e Formulário (Scrollable) */}
-        <main className="flex-1 overflow-y-auto px-6 py-4 space-y-6 scrollbar-hide">
-          {enderecoCliente.latlng && (
-            <div className={`space-y-4 animate-in fade-in slide-in-from-bottom-4 ${tentouSalvar ? 'animate-shake' : ''}`}>
-              <div className="bg-gradient-to-r from-[#161922] to-[#1a1e29] p-5 rounded-[2rem] border border-[#82C91E]/30 flex justify-between items-center">
-                <div className="flex flex-col text-white">
-                  <span className="text-[8px] font-black text-[#82C91E] uppercase italic mb-1">Taxa</span>
-                  <span className="text-2xl font-[1000] italic">R$ {enderecoCliente.taxa}</span>
-                </div>
-                <span className="bg-[#82C91E] text-black px-2 py-0.5 rounded-lg font-[1000] text-[10px] italic">{enderecoCliente.km} KM</span>
-              </div>
+                <div className="relative h-[45%] w-full shrink-0 z-10 bg-slate-100 retro-map-tiles">
+                  {mapCenter && (
+                    <MapContainer center={mapCenter} zoom={18} style={{ height: '100%', width: '100%' }} zoomControl={false}>
+                      <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+                      {rotaCoords.length > 0 && <Polyline positions={rotaCoords} color="#4B0082" weight={4} opacity={0.6} dashArray="8, 12" />}
+                      <MapCenterEvents onMoveEnd={(lat, lng) => processarLocalizacaoCentral(lat, lng, dados.numero)} />
+                      <RecenterMap coords={mapCenter} />
+                    </MapContainer>
+                  )}
+                  <div className="absolute inset-0 z-[400] shadow-[inset_0_0_40px_rgba(0,0,0,0.1)] pointer-events-none" />
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className={`bg-[#161922] p-4 rounded-2xl border ${!numero && tentouSalvar ? 'border-red-500' : 'border-white/5'}`}>
-                  <label className="text-[7px] font-black text-zinc-600 uppercase mb-1 block">Número</label>
-                  <input value={numero} onChange={e => setNumero(e.target.value)} placeholder="000" className="bg-transparent outline-none font-black text-white uppercase italic text-sm w-full" />
-                </div>
-                <div className={`bg-[#161922] p-4 rounded-2xl border ${!bairro && tentouSalvar ? 'border-red-500' : 'border-white/5'}`}>
-                  <label className="text-[7px] font-black text-zinc-600 uppercase mb-1 block">Bairro</label>
-                  <input value={bairro} onChange={e => setBairro(e.target.value)} placeholder="BAIRRO" className="bg-transparent outline-none font-black text-white uppercase italic text-sm w-full" />
-                </div>
-              </div>
-
-              <button onClick={salvarEndereco} className="w-full h-14 rounded-2xl bg-[#82C91E] text-black font-[1000] uppercase italic text-xs flex items-center justify-center gap-2">
-                CONFIRMAR ENDEREÇO <Lucide.Check size={16} />
-              </button>
-            </div>
-          )}
-
-          <div className="space-y-4">
-            <div className="flex items-center gap-4">
-               <h2 className="text-[10px] font-black text-zinc-600 uppercase italic tracking-widest">Endereços Salvos</h2>
-               <div className="h-px flex-1 bg-zinc-800/40"></div>
-            </div>
-
-            <div className="grid gap-3 pb-6">
-              {enderecos.map((end) => (
-                <div key={end.id} onClick={() => selecionarEndereco(end)} className="bg-[#161922] p-3 rounded-[1.5rem] border border-white/5 flex items-center gap-4 active:scale-95 transition-all">
-                  <div className="bg-[#0b0e13] w-10 h-10 rounded-xl flex items-center justify-center text-[#82C91E] border border-white/5">
-                    {end.tipo === 'Casa' ? <Lucide.Home size={18} /> : <Lucide.MapPin size={18} />}
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-full z-[400] pointer-events-none flex flex-col items-center">
+                      <div className="bg-white px-3 py-1.5 rounded-lg shadow-lg mb-2 text-center animate-bounce-slow border border-slate-100">
+                          <p className="text-xs font-bold text-slate-800">Você está aqui?</p>
+                          <p className="text-[9px] text-slate-400">Ajuste a localização</p>
+                          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rotate-45 border-r border-b border-slate-100" />
+                      </div>
+                      <div className="drop-shadow-[0_8px_8px_rgba(234,29,44,0.4)]">
+                          <svg width="40" height="48" viewBox="0 0 40 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                              <path d="M20 48C20 48 40 30.6 40 18.3C40 8.2 31.0 0 20 0C9.0 0 0 8.2 0 18.3C0 30.6 20 48 20 48Z" fill="#EA1D2C"/>
+                              <circle cx="20" cy="18" r="6" fill="white"/>
+                          </svg>
+                      </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-black text-white uppercase italic text-[10px] truncate">{end.bairro}</h3>
-                    <p className="text-[8px] font-bold text-zinc-600 uppercase italic truncate">{end.endereco?.split(',')[0]}, {end.numero}</p>
-                  </div>
-                  <Lucide.ChevronRight size={16} className="text-zinc-800" />
                 </div>
-              ))}
+
+                <div className="flex-1 p-6 overflow-y-auto space-y-4 bg-white z-20 custom-scrollbar text-left rounded-t-3xl -mt-6 shadow-[0_-10px_20px_rgba(0,0,0,0.05)] relative">
+                     <div className="mb-4">
+                         <h3 className="text-sm font-black text-[#4B0082] uppercase italic">{dados.rua || 'Buscando logradouro...'}</h3>
+                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">{dados.bairro ? `${dados.bairro}, Campo Grande - MS` : 'Localizando bairro...'}</p>
+                     </div>
+                     
+                     <div className="grid grid-cols-3 gap-3">
+                        <div className="col-span-1">
+                           <label className={`text-[10px] font-black uppercase tracking-widest ${precisaConfirmarNumero ? 'text-[#EA1D2C]' : 'text-slate-500'}`}>Número</label>
+                           <input 
+                             ref={numeroInputRef} 
+                             value={dados.numero} 
+                             onChange={e => {setDados({...dados, numero: e.target.value}); setPrecisaConfirmarNumero(false);}} 
+                             className={`w-full bg-white p-3 rounded-xl border-2 ${precisaConfirmarNumero ? 'border-[#EA1D2C] bg-red-50' : 'border-slate-100 focus:border-[#4B0082]'} text-slate-800 font-black text-sm outline-none transition-all`} 
+                             placeholder="Ex: 601" 
+                           />
+                        </div>
+                        <div className="col-span-2">
+                           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Complemento</label>
+                           <input 
+                             value={complemento} 
+                             onChange={e => setComplemento(e.target.value)} 
+                             placeholder="Apto/Bloco" 
+                             className="w-full bg-white p-3 rounded-xl border-2 border-slate-100 focus:border-[#4B0082] text-slate-800 font-bold text-sm outline-none transition-all" 
+                           />
+                        </div>
+                     </div>
+
+                     <div className="pt-2">
+                         <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Tipo de Local</label>
+                         <div className="flex gap-2">
+                             {['Casa', 'Trabalho'].map(t => (
+                             <button key={t} onClick={() => setTipoLocal(t)} className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase flex items-center justify-center gap-2 transition-all ${tipoLocal === t ? 'bg-[#EA1D2C]/10 text-[#EA1D2C] border-2 border-[#EA1D2C]/30 shadow-md' : 'bg-slate-50 text-slate-400 border-2 border-slate-100 hover:bg-slate-100'}`}>
+                                 {t === 'Casa' ? <Lucide.Home size={14}/> : <Lucide.Briefcase size={14}/>} {t}
+                             </button>
+                             ))}
+                         </div>
+                     </div>
+
+                     <div className="flex items-center justify-between bg-[#F1F5F9] p-4 rounded-2xl mt-4 border border-slate-200">
+                         <div className="flex items-center gap-2 text-slate-500">
+                             <Lucide.Bike size={18} className="text-[#82C91E]" /> <span className="text-[10px] font-black uppercase tracking-widest">Serviço de Entrega</span>
+                         </div>
+                         <div className="text-right">
+                             <p className="text-[9px] text-slate-400 font-black uppercase">{calculandoLogistica ? '...' : kmCalculado?.toFixed(1)} km de distância</p>
+                             <p className="text-lg font-black text-[#4B0082]">
+                                 {calculandoLogistica || taxaCalculada === null ? <Lucide.Loader2 size={16} className="animate-spin inline text-[#82C91E]"/> : `R$ ${taxaCalculada.toFixed(2).replace('.', ',')}`}
+                             </p>
+                         </div>
+                     </div>
+
+                     <button onClick={confirmarEndereco} disabled={salvando || taxaCalculada === null || calculandoLogistica} className="w-full py-5 bg-[#EA1D2C] text-white disabled:bg-slate-300 disabled:shadow-none rounded-[2rem] font-[1000] uppercase italic text-sm shadow-xl shadow-red-500/20 active:scale-95 transition-all mt-4 flex items-center justify-center gap-2">
+                        {salvando ? <Lucide.Loader2 size={20} className="animate-spin" /> : <><Lucide.CheckCircle size={20} /> Salvar Local de Entrega</>}
+                     </button>
+                </div>
             </div>
-          </div>
-        </main>
+        )}
       </div>
-
-      <style>{`
-        @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
-        .animate-shake { animation: shake 0.2s ease-in-out 0s 2; }
-        .scrollbar-hide::-webkit-scrollbar { display: none; }
-      `}</style>
+      <style>{`.retro-map-tiles .leaflet-tile-pane { filter: sepia(0.8) contrast(1.2) brightness(0.9) saturate(0.6) hue-rotate(-10deg); }`}</style>
     </div>
   );
 }
