@@ -1,22 +1,23 @@
 import React, { useEffect, useState, useRef, createContext, useContext, useCallback } from 'react';
 import { db } from '../services/firebase'; 
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, serverTimestamp, getDocs, where, addDoc, increment, deleteDoc } from "firebase/firestore";
+import { collection, query, orderBy, onSnapshot, doc, updateDoc, serverTimestamp, getDocs, where, addDoc, deleteDoc } from "firebase/firestore";
 import * as Lucide from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { MapContainer, TileLayer, Marker, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 
 // ============================================================================
-// 1. CONFIGURAÇÕES GLOBAIS, GEOFENCING E MATEMÁTICA
+// CONFIGURAÇÕES GLOBAIS E GEOFENCING
 // ============================================================================
-const LOJA_COORDS = { lat: -20.4697, lng: -54.6201 }; // Coordenadas da sua Loja
+const LOJA_COORDS = { lat: -20.43131, lng: -54.55412 };
 
 const calcularDistanciaKM = (lat1, lon1, lat2, lon2) => {
     if (!lat1 || !lon1 || !lat2 || !lon2) return 999; 
     const R = 6371; 
     const dLat = (lat2 - lat1) * (Math.PI / 180);
     const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a = 
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c; 
 };
@@ -30,7 +31,40 @@ const formatarDataHora = (data) => {
 };
 
 // ============================================================================
-// 2. SISTEMA DE NOTIFICAÇÕES (TOAST PDV)
+// CONFIGURAÇÕES DO MAPA GESTOR
+// ============================================================================
+const MAPA_STYLE = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"; 
+
+// Ícones do Mapa
+const storeIcon = L.divIcon({ className: 's-icon', html: `<div class="w-8 h-8 bg-[#4B0082] rounded-full border-2 border-white shadow-lg flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg></div>`, iconSize: [32, 32], iconAnchor: [16, 16]});
+const userIcon = L.divIcon({ className: 'u-icon', html: `<div class="w-8 h-8 bg-[#EA1D2C] rounded-full border-2 border-white shadow-lg flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"></path><circle cx="12" cy="10" r="3"></circle></svg></div>`, iconSize: [32, 32], iconAnchor: [16, 32]});
+
+function MapUpdater({ bounds }) {
+    const map = useMap();
+    useEffect(() => { if (bounds?.length > 0) map.fitBounds(bounds, { padding: [40, 40] }); }, [bounds, map]);
+    return null;
+}
+
+// Componente que renderiza o mapa (Pode ser estático ou dinâmico)
+const MotorDeRastreioGestor = ({ pedido, interativo }) => {
+    const lat = pedido.endereco?.lat;
+    const lng = pedido.endereco?.lng;
+    const bounds = lat ? [[LOJA_COORDS.lat, LOJA_COORDS.lng], [lat, lng]] : [];
+
+    if (!lat) return <div className="h-full w-full bg-slate-200 flex items-center justify-center text-slate-400 text-[10px] font-black uppercase">Localização não fornecida</div>;
+
+    return (
+        <MapContainer center={[LOJA_COORDS.lat, LOJA_COORDS.lng]} zoom={13} zoomControl={interativo} dragging={interativo} scrollWheelZoom={interativo} doubleClickZoom={interativo} touchZoom={interativo} style={{ height: '100%', width: '100%', zIndex: 0 }}>
+            <TileLayer url={MAPA_STYLE} />
+            <Marker position={[LOJA_COORDS.lat, LOJA_COORDS.lng]} icon={storeIcon} />
+            <Marker position={[lat, lng]} icon={userIcon} />
+            <MapUpdater bounds={bounds} />
+        </MapContainer>
+    );
+};
+
+// ============================================================================
+// SISTEMA DE NOTIFICAÇÕES (TOAST)
 // ============================================================================
 const ToastContext = createContext(null);
 export const useToast = () => useContext(ToastContext);
@@ -66,37 +100,39 @@ const ToastProvider = ({ children }) => {
 };
 
 // ============================================================================
-// 3. NÚCLEO DO SISTEMA DE GESTÃO (PDV & LOGÍSTICA)
+// NÚCLEO DO SISTEMA GESTOR
 // ============================================================================
 const GestorLojaContent = () => {
     const toast = useToast();
     
-    // --- ESTADOS DE SISTEMA E NAVEGAÇÃO ---
+    // Estados
     const [sistemaIniciado, setSistemaIniciado] = useState(false);
     const [telaAtual, setTelaAtual] = useState('COZINHA'); 
     const [abaKanban, setAbaKanban] = useState('NOVOS'); 
     const [dataFiltro, setDataFiltro] = useState(new Date().toISOString().split('T')[0]);
+    const [mapaExpandido, setMapaExpandido] = useState(false);
 
-    // --- BANCO DE DADOS EM TEMPO REAL ---
+    // Dados do Banco
     const [pedidos, setPedidos] = useState([]);
     const [entregadores, setEntregadores] = useState([]);
     const [leiloes, setLeiloes] = useState([]);
     const [apelidosPendentes, setApelidosPendentes] = useState([]);
     const [itensCardapio, setItensCardapio] = useState([]);
     
-    // --- CONTROLES DE INTERFACE ---
+    // Controles de Detalhes
     const [detalhesPedido, setDetalhesPedido] = useState(null);
     const [abaModal, setAbaModal] = useState('INFO'); 
     const [modalDespacho, setModalDespacho] = useState(null); 
     const [entregadorSelecionado, setEntregadorSelecionado] = useState(""); 
+    
+    // Controles do Chat e Alterações
     const [mensagens, setMensagens] = useState([]);
     const [novaMsg, setNovaMsg] = useState("");
-    const [abaCardapio, setAbaCardapio] = useState('cardapio_acai'); 
-    
-    // --- VALOR EXTRA PARA ALTERAÇÕES ---
     const [custoExtraAlteracao, setCustoExtraAlteracao] = useState("");
+    const [textoAlerta, setTextoAlerta] = useState("");
+    const [abaCardapio, setAbaCardapio] = useState('cardapio_acai'); 
 
-    // --- REFS ---
+    // Refs
     const chatEndRef = useRef(null);
     const audioRef = useRef(null);
     const audioTrocaRef = useRef(null);
@@ -126,15 +162,12 @@ const GestorLojaContent = () => {
         const qPedidos = query(collection(db, "pedidos"), orderBy("createdAt", "desc"));
         const unsubPedidos = onSnapshot(qPedidos, (snap) => {
             const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            
-            const temAlteracaoPendente = lista.some(p => p.solicitacaoAlteracao?.status === 'PENDENTE');
-            if (temAlteracaoPendente) {
+            if (lista.some(p => p.solicitacaoAlteracao?.status === 'PENDENTE')) {
                 audioTrocaRef.current.play().catch(() => {});
             }
-            
             setPedidos(lista);
         });
-        
+
         const qEntregadores = query(collection(db, "entregadores"), where("status", "==", "Livre"), where("statusAprovacao", "==", "APROVADO"));
         const unsubEntregadores = onSnapshot(qEntregadores, (snap) => setEntregadores(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
 
@@ -159,6 +192,7 @@ const GestorLojaContent = () => {
         return () => unsub();
     }, [telaAtual, abaCardapio, sistemaIniciado]);
 
+    // Buscar mensagens do chat quando abre um pedido
     useEffect(() => {
         if (!detalhesPedido) return;
         const qChat = query(collection(db, "pedidos", detalhesPedido.id, "chat"), orderBy("timestamp", "asc"));
@@ -168,6 +202,7 @@ const GestorLojaContent = () => {
 
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [mensagens, abaModal]);
 
+    // Motor de cancelamento automático
     useEffect(() => {
         if (!sistemaIniciado) return;
         const motorCentral = setInterval(() => {
@@ -193,35 +228,25 @@ const GestorLojaContent = () => {
     const moverStatus = async (pedido, novoStatus) => {
         try {
             let updateData = { status: novoStatus, statusAtualizadoEm: serverTimestamp() };
-            
             if (pedido.status === 'PENDENTE' && (novoStatus === 'FILA' || novoStatus === 'EM_PREPARO')) {
-                const tokenSeguranca = Math.floor(1000 + Math.random() * 9000).toString();
-                updateData.codigoEntrega = tokenSeguranca;
-                updateData.horarioAceitoLoja = serverTimestamp();
-                toast(`Pedido Aceito! Token de Segurança Gerado: ${tokenSeguranca}`, "success");
+                updateData.codigoEntrega = Math.floor(1000 + Math.random() * 9000).toString();
+                toast(`Pedido Aceito! Token: ${updateData.codigoEntrega}`, "success");
             } else {
                 toast(`Status atualizado para ${novoStatus.replace('_', ' ')}!`, "success");
             }
-            
             await updateDoc(doc(db, "pedidos", pedido.id), updateData);
-            
-            if (abaKanban === 'NOVOS') setAbaKanban('PREPARO');
             setDetalhesPedido(null);
-        } catch (e) { 
-            console.error("Erro ao mudar status", e);
-            toast("Erro grave ao atualizar status no banco de dados.", "error"); 
-        }
+        } catch (e) { toast("Erro ao mudar status.", "error"); }
     };
 
     // ========================================================================
-    // PROCESSADOR DE SOLICITAÇÃO DE TROCA (INTELIGÊNCIA FINANCEIRA)
+    // PROCESSAR ALTERAÇÕES E DESPACHO
     // ========================================================================
     const processarAlteracao = async (pedido, acao) => {
-        const { tipo, descricao, valorSugerido } = pedido.solicitacaoAlteracao;
+        const { tipo, descricao } = pedido.solicitacaoAlteracao;
         
         try {
             if (acao === 'ACEITAR') {
-                // Se foi cancelamento solicitado pelo cliente
                 if (tipo === 'CANCELAMENTO') {
                     await updateDoc(doc(db, "pedidos", pedido.id), {
                         "solicitacaoAlteracao.status": 'ACEITO',
@@ -232,7 +257,6 @@ const GestorLojaContent = () => {
                     return;
                 }
 
-                // Se for alteração de item ou endereço, soma o valor extra informado
                 const valorAcrescimo = Number(custoExtraAlteracao.replace(',', '.') || 0);
                 const novoTotal = (pedido.valores?.total || 0) + valorAcrescimo;
 
@@ -247,7 +271,6 @@ const GestorLojaContent = () => {
                 toast(`ALTERAÇÃO APLICADA! R$ ${valorAcrescimo} somado ao pedido.`, "success");
 
             } else {
-                // Negar alteração
                 await updateDoc(doc(db, "pedidos", pedido.id), {
                     "solicitacaoAlteracao.status": 'RECUSADO'
                 });
@@ -357,6 +380,29 @@ const GestorLojaContent = () => {
         } catch (e) { toast("Erro ao atualizar estoque.", "error"); }
     };
 
+    // ========================================================================
+    // ALERTAS E CHAT
+    // ========================================================================
+    const dispararAlerta = async (pedido) => {
+        if(!textoAlerta.trim()) return toast("Digite uma mensagem primeiro!", "error");
+        try {
+            await updateDoc(doc(db, "pedidos", pedido.id), { alertaLoja: textoAlerta });
+            toast("Alerta enviado ao aplicativo do cliente!", "success");
+            setTextoAlerta("");
+        } catch (error) {
+            toast("Erro ao enviar alerta.", "error");
+        }
+    };
+
+    const removerAlerta = async (pedido) => {
+        try {
+            await updateDoc(doc(db, "pedidos", pedido.id), { alertaLoja: null });
+            toast("Alerta retirado.", "info");
+        } catch (error) {
+            toast("Erro ao remover.", "error");
+        }
+    };
+
     const enviarMensagemChat = async (e) => {
         e.preventDefault();
         if (!novaMsg.trim() || !detalhesPedido) return;
@@ -394,6 +440,88 @@ const GestorLojaContent = () => {
         cartao: vendasConcluidas.filter(p => p.pagamento?.metodo?.toUpperCase().includes('CARTÃO') || p.pagamento?.metodo?.toUpperCase().includes('MAQUININHA')).length,
     };
 
+    // Card Resumido do Kanban
+    const CardPedido = ({ pedido }) => (
+        <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+            onClick={() => setDetalhesPedido(pedido)} 
+            className={`bg-white p-6 rounded-[2.5rem] shadow-lg border-2 active:scale-[0.98] transition-transform relative overflow-hidden
+            ${pedido.observacaoSOS ? 'border-red-500 shadow-red-500/20 animate-pulse' : 'border-slate-100 hover:border-[#82C91E]'}`}>
+            
+            {pedido.observacaoSOS && <div className="absolute top-0 left-0 w-full h-2 bg-red-600"/>}
+            {pedido.alertaLoja && <div className="absolute top-0 left-0 w-full h-2 bg-blue-500 animate-pulse"/>}
+            {pedido.solicitacaoAlteracao?.status === 'PENDENTE' && <div className="absolute top-0 left-0 w-full h-2 bg-amber-400 animate-pulse"/>}
+
+            <div className="flex justify-between items-start mb-3">
+                <div>
+                    <p className="text-[10px] font-black text-slate-400 tracking-widest uppercase flex items-center gap-1.5">
+                        <Lucide.Hash size={12}/> Pedido {pedido.id.slice(-4)}
+                    </p>
+                    <h4 className="font-[1000] text-xl text-[#4B0082] uppercase truncate max-w-[200px] italic leading-none mt-1">
+                        {pedido.cliente?.nome || 'Balcão Físico'}
+                    </h4>
+                </div>
+                <div className="text-right flex flex-col items-end gap-1">
+                    <span className={`text-[10px] font-[1000] uppercase tracking-widest px-3 py-1 rounded-lg ${pedido.observacaoSOS ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>
+                        {calcularMinutos(pedido.createdAt)} min
+                    </span>
+                    {pedido.codigoEntrega && (
+                        <span className="text-[8px] font-black text-white bg-[#82C91E] px-2 py-0.5 rounded-full uppercase flex items-center gap-1">
+                            <Lucide.Lock size={8}/> Token Gerado
+                        </span>
+                    )}
+                </div>
+            </div>
+
+            {pedido.observacaoSOS && (
+                <div className="bg-red-50 border border-red-200 p-4 rounded-2xl mb-4">
+                    <h4 className="text-[10px] font-black text-red-600 uppercase tracking-widest flex items-center gap-2 mb-1">
+                        <Lucide.Siren size={14}/> Emergência na Rota
+                    </h4>
+                    <p className="text-xs font-bold text-red-800">{pedido.observacaoSOS}</p>
+                </div>
+            )}
+
+            {pedido.solicitacaoAlteracao?.status === 'PENDENTE' && (
+                <div className="bg-amber-50 border border-amber-300 p-2 rounded-xl flex items-center gap-1 mb-2">
+                    <Lucide.AlertCircle size={14} className="text-amber-600" />
+                    <p className="text-[10px] font-black text-amber-600 uppercase">Solicitação Pendente!</p>
+                </div>
+            )}
+            
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 mb-5">
+                <p className="text-xs font-bold text-slate-600 uppercase flex items-center gap-2">
+                    <span className="text-[#4B0082] font-[1000]">{pedido.itens?.length} Itens</span> na lista
+                </p>
+                <div className="flex justify-between items-center mt-2 pt-2 border-t border-slate-200">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{pedido.tipoPedido}</span>
+                    <span className="text-sm font-[1000] italic text-[#82C91E]">R$ {pedido.valores?.total?.toFixed(2)}</span>
+                </div>
+            </div>
+            
+            <div className="grid grid-cols-1 gap-2 relative z-10">
+                {pedido.status === 'PENDENTE' && <button onClick={(e) => { e.stopPropagation(); moverStatus(pedido, 'FILA'); }} className="w-full py-5 bg-[#4B0082] text-white font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl hover:bg-indigo-900 transition-colors flex items-center justify-center gap-2">Gerar Token e Aceitar <Lucide.ArrowRight size={16}/></button>}
+                {pedido.status === 'FILA' && <button onClick={(e) => { e.stopPropagation(); moverStatus(pedido, 'EM_PREPARO'); }} className="w-full py-5 bg-amber-400 hover:bg-amber-500 text-white font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl transition-colors flex items-center justify-center gap-2">Colocar na Bancada <Lucide.Flame size={16}/></button>}
+                {pedido.status === 'EM_PREPARO' && <button onClick={(e) => { e.stopPropagation(); setModalDespacho(pedido); }} className="w-full py-5 bg-[#82C91E] hover:bg-lime-500 text-[#4B0082] font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl transition-colors flex items-center justify-center gap-2">Embalar e Despachar <Lucide.PackageCheck size={16}/></button>}
+                
+                {pedido.status === 'PRONTO' && (
+                    <div className="bg-blue-50 p-4 rounded-2xl text-center border border-blue-100">
+                        <p className="text-[10px] font-black uppercase text-blue-600 flex items-center justify-center gap-2">
+                            <Lucide.Radar size={14}/> Radar Tocando na Nuvem
+                        </p>
+                    </div>
+                )}
+
+                {pedido.status === 'SAIU_ENTREGA' && (
+                    <div className="bg-purple-50 p-4 rounded-2xl text-center border border-purple-100">
+                        <p className="text-[10px] font-black uppercase text-purple-600 flex items-center justify-center gap-2">
+                            <Lucide.Bike size={14}/> Piloto em Rota de Entrega
+                        </p>
+                    </div>
+                )}
+            </div>
+        </motion.div>
+    );
+
     if (!sistemaIniciado) {
         return (
             <div className="h-[100dvh] w-full bg-gradient-to-br from-[#1F0137] to-[#4B0082] flex flex-col items-center justify-center p-8 text-center relative overflow-hidden">
@@ -413,8 +541,9 @@ const GestorLojaContent = () => {
     }
 
     return (
-        <div className="h-[100dvh] w-full bg-[#F8FAFC] flex flex-col font-sans text-slate-900 overflow-hidden">
+        <div className="flex flex-col h-[100dvh] w-full bg-[#F8FAFC] font-sans text-slate-900 overflow-hidden relative">
             
+            {/* CABEÇALHO */}
             <header className="bg-gradient-to-r from-[#1F0137] to-[#4B0082] pt-10 pb-5 px-6 text-white flex justify-between items-center shadow-lg shrink-0 relative z-10">
                 <div className="flex items-center gap-4">
                     <div className="w-12 h-12 bg-[#82C91E] rounded-xl flex items-center justify-center border-2 border-white/20 shadow-inner">
@@ -431,6 +560,7 @@ const GestorLojaContent = () => {
 
             <main className="flex-1 overflow-hidden flex flex-col relative z-0">
                 
+                {/* --- TELA: COZINHA / KANBAN --- */}
                 {telaAtual === 'COZINHA' && (
                     <div className="flex-1 flex flex-col overflow-hidden bg-slate-100/50">
                         <div className="flex overflow-x-auto gap-3 p-5 bg-white shadow-sm no-scrollbar border-b border-slate-200 shrink-0">
@@ -461,124 +591,14 @@ const GestorLojaContent = () => {
                         <div className="flex-1 overflow-y-auto p-5 space-y-5 pb-28 custom-scrollbar">
                             <AnimatePresence>
                                 {pedidos.filter(p => abaKanban === 'NOVOS' ? ['PENDENTE','AGUARDANDO_PAGAMENTO'].includes(p.status) : abaKanban === 'PREPARO' ? ['FILA','EM_PREPARO'].includes(p.status) : ['PRONTO','SAIU_ENTREGA'].includes(p.status)).map(pedido => (
-                                    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
-                                        key={pedido.id} onClick={() => setDetalhesPedido(pedido)} 
-                                        className={`bg-white p-6 rounded-[2.5rem] shadow-lg border-2 active:scale-[0.98] transition-transform relative overflow-hidden
-                                        ${pedido.observacaoSOS ? 'border-red-500 shadow-red-500/20 animate-pulse' : 'border-slate-100 hover:border-[#82C91E]'}`}>
-                                        
-                                        {pedido.observacaoSOS && <div className="absolute top-0 left-0 w-full h-2 bg-red-600"/>}
-
-                                        <div className="flex justify-between items-start mb-3">
-                                            <div>
-                                                <p className="text-[10px] font-black text-slate-400 tracking-widest uppercase flex items-center gap-1.5">
-                                                    <Lucide.Hash size={12}/> Pedido {pedido.id.slice(-4)}
-                                                </p>
-                                                <h4 className="font-[1000] text-xl text-[#4B0082] uppercase truncate max-w-[200px] italic leading-none mt-1">
-                                                    {pedido.cliente?.nome || 'Balcão Físico'}
-                                                </h4>
-                                            </div>
-                                            
-                                            <div className="text-right flex flex-col items-end gap-1">
-                                                <span className={`text-[10px] font-[1000] uppercase tracking-widest px-3 py-1 rounded-lg ${pedido.observacaoSOS ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>
-                                                    {calcularMinutos(pedido.createdAt)} min
-                                                </span>
-                                                {pedido.codigoEntrega && (
-                                                    <span className="text-[8px] font-black text-white bg-[#82C91E] px-2 py-0.5 rounded-full uppercase flex items-center gap-1">
-                                                        <Lucide.Lock size={8}/> Token Gerado
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        {pedido.observacaoSOS && (
-                                            <div className="bg-red-50 border border-red-200 p-4 rounded-2xl mb-4">
-                                                <h4 className="text-[10px] font-black text-red-600 uppercase tracking-widest flex items-center gap-2 mb-1">
-                                                    <Lucide.Siren size={14}/> Emergência na Rota
-                                                </h4>
-                                                <p className="text-xs font-bold text-red-800">{pedido.observacaoSOS}</p>
-                                            </div>
-                                        )}
-
-                                        {/* 👇 ALERTA DE ALTERAÇÃO INTELIGENTE DO CLIENTE 👇 */}
-                                        {pedido.solicitacaoAlteracao?.status === 'PENDENTE' && (
-                                            <div className="bg-amber-50 border-2 border-amber-400 p-4 rounded-3xl mt-2 mb-4 animate-bounce">
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <Lucide.AlertCircle size={16} className="text-amber-600" />
-                                                    <p className="text-[10px] font-black text-amber-600 uppercase">SOLICITAÇÃO: {pedido.solicitacaoAlteracao.tipo}</p>
-                                                </div>
-                                                <p className="text-sm font-bold text-slate-800 my-2 italic">"{pedido.solicitacaoAlteracao.descricao}"</p>
-                                                
-                                                <div className="flex items-center gap-2 mb-3">
-                                                    <span className="text-[10px] font-black text-slate-400 uppercase">Custo Extra (R$):</span>
-                                                    <input 
-                                                        type="number" 
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        value={custoExtraAlteracao}
-                                                        onChange={(e) => setCustoExtraAlteracao(e.target.value)}
-                                                        placeholder="Ex: 5,00"
-                                                        className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-xs font-bold outline-none focus:border-amber-500"
-                                                    />
-                                                </div>
-
-                                                <div className="flex gap-2">
-                                                    <button onClick={(e) => { e.stopPropagation(); processarAlteracao(pedido, 'RECUSAR'); }} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-black text-[10px] uppercase shadow-lg shadow-red-200">Negar</button>
-                                                    <button onClick={(e) => { e.stopPropagation(); processarAlteracao(pedido, 'ACEITAR'); }} className="flex-1 py-3 bg-green-500 text-white rounded-xl font-black text-[10px] uppercase shadow-lg shadow-green-200">Aceitar & Somar Valor</button>
-                                                </div>
-                                            </div>
-                                        )}
-                                        
-                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 mb-5">
-                                            <p className="text-xs font-bold text-slate-600 uppercase flex items-center gap-2">
-                                                <span className="text-[#4B0082] font-[1000]">{pedido.itens?.length} Itens</span> na lista
-                                            </p>
-                                            <div className="flex justify-between items-center mt-2 pt-2 border-t border-slate-200">
-                                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{pedido.tipoPedido}</span>
-                                                <span className="text-sm font-[1000] italic text-[#82C91E]">R$ {pedido.valores?.total?.toFixed(2)}</span>
-                                            </div>
-                                        </div>
-                                        
-                                        <div className="grid grid-cols-1 gap-2 relative z-10">
-                                            {pedido.status === 'PENDENTE' && (
-                                                <button onClick={(e) => { e.stopPropagation(); moverStatus(pedido, 'FILA'); }} className="w-full py-5 bg-[#4B0082] text-white font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl hover:bg-indigo-900 transition-colors flex items-center justify-center gap-2">
-                                                    Gerar Token e Aceitar <Lucide.ArrowRight size={16}/>
-                                                </button>
-                                            )}
-                                            
-                                            {pedido.status === 'FILA' && (
-                                                <button onClick={(e) => { e.stopPropagation(); moverStatus(pedido, 'EM_PREPARO'); }} className="w-full py-5 bg-amber-400 hover:bg-amber-500 text-white font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl transition-colors flex items-center justify-center gap-2">
-                                                    Colocar na Bancada <Lucide.Flame size={16}/>
-                                                </button>
-                                            )}
-                                            
-                                            {pedido.status === 'EM_PREPARO' && (
-                                                <button onClick={(e) => { e.stopPropagation(); setModalDespacho(pedido); }} className="w-full py-5 bg-[#82C91E] hover:bg-lime-500 text-[#4B0082] font-[1000] text-xs tracking-widest uppercase rounded-2xl shadow-xl transition-colors flex items-center justify-center gap-2">
-                                                    Embalar e Despachar <Lucide.PackageCheck size={16}/>
-                                                </button>
-                                            )}
-
-                                            {pedido.status === 'PRONTO' && (
-                                                <div className="bg-blue-50 p-4 rounded-2xl text-center border border-blue-100">
-                                                    <p className="text-[10px] font-black uppercase text-blue-600 flex items-center justify-center gap-2">
-                                                        <Lucide.Radar size={14}/> Radar Tocando na Nuvem
-                                                    </p>
-                                                </div>
-                                            )}
-
-                                            {pedido.status === 'SAIU_ENTREGA' && (
-                                                <div className="bg-purple-50 p-4 rounded-2xl text-center border border-purple-100">
-                                                    <p className="text-[10px] font-black uppercase text-purple-600 flex items-center justify-center gap-2">
-                                                        <Lucide.Bike size={14}/> Piloto em Rota de Entrega
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </motion.div>
+                                    <CardPedido key={pedido.id} pedido={pedido} />
                                 ))}
                             </AnimatePresence>
                         </div>
                     </div>
                 )}
 
+                {/* --- TELA: LEILÃO (MANTIDA INTACTA) --- */}
                 {telaAtual === 'LEILAO' && (
                     <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
                         <div className="p-6 bg-white border-b border-slate-200 shrink-0 shadow-sm">
@@ -645,20 +665,14 @@ const GestorLojaContent = () => {
                                                     <p className="font-[1000] text-white uppercase text-xl truncate">{l.ultimoLicitante || 'Aguardando 1º lance...'}</p>
                                                 </div>
 
-                                                <button 
-    onClick={async () => { 
-        if(window.confirm("Bater o martelo e vender para " + (l.ultimoLicitante || 'ninguém') + "?")) {
-            if (!l.ultimoLicitanteUid) return alert("Nenhum lance foi dado ainda!");
-            // Em vez de deletar, atualizamos o status para FINALIZADO e definimos o ganhador
-            await updateDoc(doc(db, "leiloes", l.id), { 
-                status: 'FINALIZADO',
-                ganhadorUid: l.ultimoLicitanteUid 
-            });
-        }
-    }} 
-    className="w-full py-5 bg-white/10 hover:bg-red-500 text-white rounded-2xl font-[1000] text-xs uppercase tracking-widest italic border border-white/20 transition-all active:scale-95 relative z-10">
-    Bater o Martelo (Encerrar e Cobrar)
-</button>
+                                                <button onClick={async () => { 
+                                                    if(window.confirm("Bater o martelo e vender para " + (l.ultimoLicitante || 'ninguém') + "?")) {
+                                                        if (!l.ultimoLicitanteUid) return alert("Nenhum lance foi dado ainda!");
+                                                        await updateDoc(doc(db, "leiloes", l.id), { status: 'FINALIZADO', ganhadorUid: l.ultimoLicitanteUid });
+                                                    }
+                                                }} className="w-full py-5 bg-white/10 hover:bg-red-500 text-white rounded-2xl font-[1000] text-xs uppercase tracking-widest italic border border-white/20 transition-all active:scale-95 relative z-10">
+                                                    Bater o Martelo (Encerrar e Cobrar)
+                                                </button>
                                             </div>
                                         ))}
                                     </div>
@@ -668,6 +682,7 @@ const GestorLojaContent = () => {
                     </div>
                 )}
 
+                {/* --- TELA: CARDÁPIO / BOTÕES DE PÂNICO (MANTIDA INTACTA) --- */}
                 {telaAtual === 'CARDAPIO' && (
                     <div className="flex-1 flex flex-col bg-slate-50">
                         <div className="p-6 bg-white border-b border-slate-200 shrink-0 shadow-sm">
@@ -715,6 +730,7 @@ const GestorLojaContent = () => {
                     </div>
                 )}
 
+                {/* --- TELA: DASHBOARD / MÉTRICAS (MANTIDA INTACTA) --- */}
                 {telaAtual === 'DASHBOARD' && (
                     <div className="flex-1 p-6 overflow-y-auto custom-scrollbar pb-32 bg-slate-50 space-y-6">
                         <div className="flex justify-between items-center bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm">
@@ -775,6 +791,7 @@ const GestorLojaContent = () => {
                     </div>
                 )}
 
+                {/* --- TELA: HISTÓRICO / AUDITORIA (MANTIDA INTACTA) --- */}
                 {telaAtual === 'HISTORICO' && (
                     <div className="flex-1 flex flex-col bg-slate-50 h-full">
                         <div className="bg-white p-6 border-b border-slate-200 shrink-0 flex justify-between items-center shadow-sm z-10">
@@ -847,6 +864,7 @@ const GestorLojaContent = () => {
                 )}
             </main>
 
+            {/* NAVEGAÇÃO INFERIOR */}
             <nav className="h-20 bg-white border-t border-slate-200 flex justify-around items-center shrink-0 shadow-[0_-10px_30px_rgba(0,0,0,0.05)] pb-[env(safe-area-inset-bottom)] fixed bottom-0 left-0 right-0 z-40">
                 {[
                     { id: 'COZINHA', icon: Lucide.ListOrdered, label: 'Operação', cor: 'text-[#4B0082]' },
@@ -862,6 +880,7 @@ const GestorLojaContent = () => {
                 ))}
             </nav>
 
+            {/* MODAL DE DESPACHO (MANTIDO INTACTO) */}
             <AnimatePresence>
                 {modalDespacho && (
                     <div className="fixed inset-0 z-[2000] bg-slate-900/70 backdrop-blur-md flex items-end justify-center p-4">
@@ -914,20 +933,30 @@ const GestorLojaContent = () => {
                 )}
             </AnimatePresence>
 
+          {/* ========================================================= */}
+            {/* PÁGINA DE DETALHES DO PEDIDO (Agora se porta como página) */}
+            {/* ========================================================= */}
             <AnimatePresence>
                 {detalhesPedido && (
-                    <motion.div initial={{ opacity: 0, y: "100%" }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: "100%" }} transition={{ type: "spring", damping: 25 }} className="fixed inset-0 z-[3000] bg-white flex flex-col pb-[env(safe-area-inset-bottom)]">
-                        
-                        <header className="bg-gradient-to-r from-[#1F0137] to-[#4B0082] pt-12 pb-6 px-6 text-white flex justify-between items-center shrink-0 shadow-xl relative z-20">
-                            <div className="flex items-center gap-4">
-                                <button onClick={() => setDetalhesPedido(null)} className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center active:scale-90 transition-all border border-white/10"><Lucide.ChevronDown size={28}/></button>
-                                <div>
-                                    <h2 className="text-2xl font-[1000] uppercase italic tracking-tighter leading-none mb-1">Pedido #{detalhesPedido.id.slice(-4)}</h2>
-                                    <p className="text-[10px] font-black text-[#82C91E] uppercase tracking-[0.2em]">{detalhesPedido.tipoPedido}</p>
-                                </div>
+                    <motion.div 
+                        initial={{ x: "100%" }} 
+                        animate={{ x: 0 }} 
+                        exit={{ x: "100%" }} 
+                        transition={{ type: "spring", damping: 25, stiffness: 200 }} 
+                        className="fixed inset-0 z-[5000] w-full h-[100dvh] bg-slate-50 flex flex-col shadow-2xl"
+                    >
+                        {/* HEADER DA PÁGINA COM BOTÃO DE VOLTAR */}
+                        <header className="bg-gradient-to-r from-[#1F0137] to-[#4B0082] p-5 pt-8 text-white flex items-center gap-4 shrink-0 shadow-md">
+                            <button onClick={() => setDetalhesPedido(null)} className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center active:scale-90 transition-all hover:bg-white/20">
+                                <Lucide.ArrowLeft size={24} strokeWidth={2.5}/>
+                            </button>
+                            <div>
+                                <h2 className="text-2xl font-[1000] uppercase italic leading-none mb-1 tracking-tighter">Pedido #{detalhesPedido.id.slice(-4)}</h2>
+                                <p className="text-[10px] font-black text-[#82C91E] uppercase tracking-widest">{detalhesPedido.tipoPedido}</p>
                             </div>
                         </header>
 
+                        {/* ABAS DO MODAL */}
                         <div className="flex bg-white shadow-sm relative z-10 shrink-0">
                             <button onClick={() => setAbaModal('INFO')} className={`flex-1 py-5 text-[11px] font-[1000] uppercase tracking-widest border-b-4 transition-colors ${abaModal === 'INFO' ? 'border-[#4B0082] text-[#4B0082]' : 'border-transparent text-slate-400 hover:bg-slate-50'}`}>Ficha Técnica</button>
                             <button onClick={() => setAbaModal('CHAT')} className={`flex-1 py-5 text-[11px] font-[1000] uppercase tracking-widest border-b-4 transition-colors flex items-center justify-center gap-2 ${abaModal === 'CHAT' ? 'border-[#4B0082] text-[#4B0082]' : 'border-transparent text-slate-400 hover:bg-slate-50'}`}>
@@ -936,103 +965,152 @@ const GestorLojaContent = () => {
                             </button>
                         </div>
 
-                        <div className="flex-1 overflow-y-auto bg-[#F8FAFC] relative">
+                        {/* CONTEÚDO DAS ABAS */}
+                        <div className="flex-1 overflow-y-auto custom-scrollbar relative">
                             {abaModal === 'INFO' ? (
-                                <div className="p-6 space-y-6 pb-32 custom-scrollbar">
+                                <div className="p-6 space-y-6 pb-24">
                                     
-                                    {detalhesPedido.codigoEntrega && (
-                                        <div className="bg-[#82C91E]/20 border-2 border-[#82C91E]/50 p-6 rounded-[2.5rem] flex items-center justify-between">
-                                            <div>
-                                                <h3 className="text-[#4B0082] font-[1000] uppercase text-sm mb-1 flex items-center gap-2"><Lucide.Lock size={16}/> Token do Motoboy</h3>
-                                                <p className="text-[10px] font-bold text-slate-600 uppercase">O cliente precisará informar este código na entrega.</p>
+                                    {/* AVISAR CLIENTE */}
+                                    <div className="bg-blue-50 p-5 rounded-2xl border border-blue-200 shadow-sm">
+                                        <h3 className="text-[10px] font-black text-blue-800 uppercase tracking-widest mb-3 flex items-center gap-2"><Lucide.BellRing size={14}/> Avisar o Cliente (App)</h3>
+                                        {detalhesPedido.alertaLoja ? (
+                                            <div className="bg-white p-3 rounded-xl border border-blue-200 flex justify-between items-center shadow-sm">
+                                                <p className="text-xs font-bold text-blue-900 italic">"{detalhesPedido.alertaLoja}"</p>
+                                                <button onClick={() => removerAlerta(detalhesPedido)} className="text-red-500 hover:bg-red-50 p-2 rounded-lg"><Lucide.Trash2 size={16}/></button>
                                             </div>
-                                            <div className="text-3xl font-[1000] text-[#4B0082] tracking-[0.3em] bg-white px-4 py-2 rounded-2xl shadow-sm">
-                                                {detalhesPedido.codigoEntrega}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {detalhesPedido.pagamento?.metodo?.includes('Na Entrega') && (
-                                        <div className="bg-red-50 border-2 border-red-500 p-8 rounded-[2.5rem] shadow-sm">
-                                            <h3 className="text-red-700 font-[1000] uppercase italic text-xl flex items-center gap-2 mb-2"><Lucide.AlertTriangle/> Motoboy deve cobrar</h3>
-                                            <p className="text-red-600 font-bold text-xs uppercase mb-2">No ato da entrega via: {detalhesPedido.pagamento.metodo}</p>
-                                            <p className="text-red-800 font-[1000] text-5xl tracking-tighter mb-4">R$ {detalhesPedido.valores?.total?.toFixed(2).replace('.', ',')}</p>
-                                            
-                                            {detalhesPedido.pagamento.valorTrocoPara && (
-                                                <div className="bg-red-100 p-4 rounded-2xl inline-block border border-red-200">
-                                                    <p className="text-red-700 font-black text-[11px] uppercase tracking-widest flex items-center gap-2">
-                                                        <Lucide.Banknote size={16}/> Separar troco para R$ {detalhesPedido.pagamento.valorTrocoPara}
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    <div className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm">
-                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5"><Lucide.User size={14}/> Cliente Solicitante</p>
-                                        <h3 className="text-2xl font-[1000] text-slate-800 uppercase italic leading-none mb-3">{detalhesPedido.cliente?.nome}</h3>
-                                        <p className="text-sm font-bold text-slate-500 flex items-center gap-2 bg-slate-50 p-3 rounded-xl inline-flex"><Lucide.Phone size={16} className="text-[#82C91E]"/> {detalhesPedido.cliente?.telefone}</p>
-                                        
-                                        {detalhesPedido.tipoPedido === 'ENTREGA' && (
-                                            <div className="mt-4 pt-4 border-t border-slate-100">
-                                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5"><Lucide.MapPin size={14}/> Destino</p>
-                                                <p className="text-sm font-[1000] text-slate-700 uppercase">{detalhesPedido.endereco?.rua}, {detalhesPedido.endereco?.numero}</p>
-                                                <p className="text-xs font-bold text-slate-500 uppercase mt-1">{detalhesPedido.endereco?.bairro}</p>
-                                                {detalhesPedido.endereco?.complemento && <p className="text-xs font-black text-amber-600 uppercase mt-2 bg-amber-50 p-2 rounded-xl inline-block">Ref/Apto: {detalhesPedido.endereco.complemento}</p>}
+                                        ) : (
+                                            <div className="flex flex-col gap-2">
+                                                <input value={textoAlerta} onChange={e => setTextoAlerta(e.target.value)} placeholder="Ex: Houve um problema, vai atrasar 10 min..." className="w-full bg-white border border-blue-200 rounded-xl px-4 py-3 text-xs outline-none focus:border-blue-500 font-bold text-blue-900 placeholder:text-blue-300" />
+                                                <button onClick={() => dispararAlerta(detalhesPedido)} className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-colors flex items-center justify-center gap-2">
+                                                    <Lucide.Send size={14}/> Disparar Aviso
+                                                </button>
                                             </div>
                                         )}
                                     </div>
 
-                                    <div className="space-y-4">
-                                        <p className="text-xs font-[1000] text-[#4B0082] uppercase tracking-widest flex items-center gap-2 bg-[#4B0082]/10 px-4 py-2 rounded-xl inline-flex">
-                                            <Lucide.ListChecks size={18}/> Ficha de Montagem da Cozinha
-                                        </p>
+                                    {/* PROCESSAR ALTERAÇÃO */}
+                                    {detalhesPedido.solicitacaoAlteracao?.status === 'PENDENTE' && (
+                                        <div className="bg-amber-50 border-2 border-amber-400 p-4 rounded-3xl animate-pulse">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <Lucide.AlertCircle size={16} className="text-amber-600" />
+                                                <p className="text-[10px] font-black text-amber-600 uppercase">SOLICITAÇÃO: {detalhesPedido.solicitacaoAlteracao.tipo}</p>
+                                            </div>
+                                            <p className="text-sm font-bold text-slate-800 my-2 italic">"{detalhesPedido.solicitacaoAlteracao.descricao}"</p>
+                                            
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <span className="text-[10px] font-black text-slate-400 uppercase">Custo Extra (R$):</span>
+                                                <input 
+                                                    type="number" 
+                                                    value={custoExtraAlteracao}
+                                                    onChange={(e) => setCustoExtraAlteracao(e.target.value)}
+                                                    placeholder="Ex: 5,00"
+                                                    className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-xs font-bold outline-none focus:border-amber-500"
+                                                />
+                                            </div>
+
+                                            <div className="flex gap-2">
+                                                <button onClick={() => processarAlteracao(detalhesPedido, 'RECUSAR')} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-black text-[10px] uppercase shadow-lg shadow-red-200">Negar</button>
+                                                <button onClick={() => processarAlteracao(detalhesPedido, 'ACEITAR')} className="flex-1 py-3 bg-green-500 text-white rounded-xl font-black text-[10px] uppercase shadow-lg shadow-green-200">Aceitar & Somar</button>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* DADOS DO CLIENTE & MAPA ESTÁTICO */}
+                                    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-1"><Lucide.User size={12}/> Dados do Cliente</p>
+                                        <h3 className="text-xl font-[1000] text-[#4B0082] uppercase italic mb-1">{detalhesPedido.cliente?.nome}</h3>
+                                        <p className="text-xs font-bold text-slate-500 mb-4">{detalhesPedido.cliente?.telefone}</p>
                                         
-                                        {detalhesPedido.itens?.map((it, idx) => (
-                                            <div key={idx} className="bg-white p-6 rounded-[2.5rem] border-2 border-slate-100 shadow-sm flex flex-col md:flex-row gap-5 items-start">
-                                                <div className="w-16 h-16 bg-[#4B0082] rounded-2xl flex items-center justify-center text-3xl font-[1000] text-[#82C91E] shrink-0 shadow-lg">
-                                                    {it.quantidade || 1}x
-                                                </div>
-                                                <div className="flex-1 w-full">
-                                                    <h3 className="text-2xl font-[1000] text-[#4B0082] uppercase italic leading-none mb-1">{it.detalhes?.tamanho || it.tamanho}</h3>
-                                                    <h4 className="text-[13px] font-black text-slate-400 uppercase mb-4 tracking-widest">{it.detalhes?.baseNome || it.baseNome}</h4>
-                                                    
-                                                    <div className="space-y-2 bg-slate-50 p-4 rounded-2xl border border-slate-100 w-full">
-                                                        {it.detalhes?.cobertura_detalhes && (
-                                                            <p className="text-xs font-black text-pink-600 uppercase flex items-center gap-2">
-                                                                <div className="w-2 h-2 bg-pink-500 rounded-full"/> Calda: {it.detalhes.cobertura_detalhes.nome || it.detalhes.cobertura_detalhes}
-                                                            </p>
-                                                        )}
-                                                        {(it.detalhes?.acompanhamentos_detalhes || []).map((ac, i) => (
-                                                            <p key={i} className="text-xs font-bold text-slate-600 uppercase flex items-center gap-2">
-                                                                <div className="w-1.5 h-1.5 bg-slate-300 rounded-full"/> {ac.nome || ac}
-                                                            </p>
-                                                        ))}
-                                                        {(it.detalhes?.adicionais_detalhes || []).map((ad, i) => (
-                                                            <p key={`add-${i}`} className="text-xs font-[1000] text-[#4B0082] uppercase flex items-center gap-2">
-                                                                <Lucide.Plus size={14} className="text-[#82C91E]"/> {ad.qtd}x {ad.nome || ad}
-                                                            </p>
-                                                        ))}
-                                                    </div>
-                                                    
-                                                    {it.observacao && (
-                                                        <div className="mt-4 bg-amber-50 p-4 rounded-2xl border-l-4 border-amber-500">
-                                                            <p className="text-xs font-[1000] text-amber-800 uppercase italic">⚠️ ATENÇÃO: {it.observacao}</p>
+                                        {detalhesPedido.tipoPedido === 'ENTREGA' && (
+                                            <div className="pt-4 border-t border-slate-100">
+                                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-1.5"><Lucide.MapPin size={12}/> Local de Entrega</p>
+                                                
+                                                {/* NOVO: MAPA ESTÁTICO (MINIATURA) */}
+                                                {detalhesPedido.endereco?.lat && (
+                                                    <div className="w-full h-36 bg-slate-100 rounded-2xl overflow-hidden relative cursor-pointer mb-4 border border-slate-200 shadow-inner group" onClick={() => setMapaExpandido(true)}>
+                                                        <div className="absolute inset-0 z-10 bg-[#4B0082]/10 flex items-center justify-center group-hover:bg-[#4B0082]/30 transition-colors">
+                                                            <span className="bg-white/95 backdrop-blur-sm px-4 py-2 rounded-full text-[9px] font-black text-[#4B0082] uppercase flex items-center gap-2 shadow-lg">
+                                                                <Lucide.Maximize2 size={12} className="text-[#82C91E]"/> Tocar para Expandir o Mapa
+                                                            </span>
                                                         </div>
-                                                    )}
+                                                        {/* Atenção: Certifique-se de que o MotorDeRastreioGestor está declarado no topo como instruído */}
+                                                        <MotorDeRastreioGestor pedido={detalhesPedido} interativo={false} />
+                                                    </div>
+                                                )}
+
+                                                <p className="text-xs font-[1000] text-slate-700 uppercase">{detalhesPedido.endereco?.rua}, {detalhesPedido.endereco?.numero}</p>
+                                                <p className="text-[10px] font-bold text-slate-500 uppercase mt-0.5">{detalhesPedido.endereco?.bairro}</p>
+                                                {detalhesPedido.endereco?.complemento && <p className="text-[10px] font-black text-amber-700 uppercase mt-2 bg-amber-50 px-3 py-2 rounded-xl inline-block border border-amber-200">Ref: {detalhesPedido.endereco.complemento}</p>}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* ITENS DO PEDIDO */}
+                                    <div className="space-y-3">
+                                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 ml-1">
+                                            <Lucide.List size={14}/> Ficha de Produção
+                                        </h3>
+                                        {detalhesPedido.itens?.map((it, idx) => (
+                                            <div key={idx} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex gap-4">
+                                                <div className="w-10 h-10 bg-[#4B0082] rounded-lg flex items-center justify-center text-lg font-[1000] text-[#82C91E] shrink-0">{it.quantidade}x</div>
+                                                <div className="flex-1">
+                                                    <h4 className="text-sm font-[1000] text-slate-800 uppercase italic">{it.detalhes?.tamanho || it.tamanho}</h4>
+                                                    <p className="text-[10px] font-black text-slate-400 uppercase mb-2">{it.detalhes?.baseNome || it.baseNome}</p>
+                                                    <div className="space-y-1">
+                                                        {(it.detalhes?.acompanhamentos_detalhes || []).map((ac, i) => <p key={i} className="text-[10px] font-bold text-slate-600 uppercase">• {ac.nome || ac}</p>)}
+                                                        {(it.detalhes?.adicionais_detalhes || []).map((ad, i) => <p key={i} className="text-[10px] font-[1000] text-[#4B0082] uppercase">+ {ad.qtd}x {ad.nome || ad}</p>)}
+                                                    </div>
                                                 </div>
                                             </div>
                                         ))}
                                     </div>
-                                    
-                                    {detalhesPedido.observacao && (
-                                        <div className="bg-red-50 p-6 rounded-[2.5rem] border-2 border-red-200 mt-6">
-                                            <p className="text-xs font-[1000] text-red-600 uppercase tracking-widest mb-2 flex items-center gap-2"><Lucide.AlertCircle size={16}/> Observação Geral do Cliente</p>
-                                            <p className="text-base font-bold text-red-800">{detalhesPedido.observacao}</p>
+
+                                    {/* EXTRATO FINANCEIRO DETALHADO */}
+                                    <div className="bg-white p-6 rounded-2xl border-2 border-slate-200 shadow-sm relative overflow-hidden">
+                                        <div className="absolute top-0 right-0 bg-slate-100 px-3 py-1 rounded-bl-2xl font-black text-[9px] uppercase text-slate-500">
+                                            PGTO: {detalhesPedido.pagamento?.metodo}
                                         </div>
-                                    )}
+
+                                        <h3 className="text-[10px] font-black text-[#4B0082] uppercase tracking-widest mb-4 flex items-center gap-2"><Lucide.Receipt size={14}/> Extrato Detalhado</h3>
+                                        
+                                        <div className="space-y-3">
+                                            <div className="flex justify-between items-center text-xs font-bold text-slate-600">
+                                                <span>Subtotal</span>
+                                                <span>R$ {Number(detalhesPedido.valores?.subtotal || 0).toFixed(2)}</span>
+                                            </div>
+                                            <div className="flex justify-between items-center text-xs font-bold text-slate-600">
+                                                <span>Entrega</span>
+                                                <span>{detalhesPedido.valores?.taxa > 0 ? `R$ ${Number(detalhesPedido.valores.taxa).toFixed(2)}` : 'Grátis'}</span>
+                                            </div>
+                                            {detalhesPedido.gorjeta > 0 && (
+                                                <div className="flex justify-between items-center text-[11px] font-black uppercase text-pink-500 bg-pink-50 p-2 rounded-lg">
+                                                    <span>Caixinha</span>
+                                                    <span>+ R$ {Number(detalhesPedido.gorjeta).toFixed(2)}</span>
+                                                </div>
+                                            )}
+                                            {detalhesPedido.valores?.desconto > 0 && (
+                                                <div className="flex justify-between items-center text-[11px] font-black uppercase text-[#82C91E] bg-[#82C91E]/10 p-2 rounded-lg">
+                                                    <span>Desconto</span>
+                                                    <span>- R$ {Number(detalhesPedido.valores.desconto).toFixed(2)}</span>
+                                                </div>
+                                            )}
+                                            
+                                            <div className="pt-4 border-t border-slate-200 flex justify-between items-end mt-2">
+                                                <span className="text-xs font-[1000] text-[#4B0082] uppercase tracking-widest">Total</span>
+                                                <span className="text-3xl font-[1000] text-[#4B0082] italic leading-none">R$ {Number(detalhesPedido.valores?.total || 0).toFixed(2)}</span>
+                                            </div>
+                                            
+                                            {detalhesPedido.pagamento?.valorTrocoPara && (
+                                                <div className="mt-3 bg-red-50 text-red-700 p-3 rounded-xl border border-red-200 flex justify-between items-center font-black text-xs uppercase">
+                                                    <span>Troco Para:</span>
+                                                    <span>R$ {detalhesPedido.pagamento.valorTrocoPara}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
                             ) : (
+                                /* ABA CHAT CLIENTE */
                                 <div className="h-full flex flex-col bg-slate-100 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
                                     <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
                                         {mensagens.length === 0 ? (
@@ -1066,7 +1144,7 @@ const GestorLojaContent = () => {
                                                 className="w-full bg-transparent py-4 text-sm font-bold text-slate-700 outline-none placeholder:text-slate-400"
                                             />
                                         </div>
-                                        <button type="submit" className="w-14 h-14 rounded-full flex items-center justify-center bg-[#82C91E] text-[#4B0082] shadow-lg active:scale-90 transition-transform shrink-0">
+                                        <button type="submit" disabled={!novaMsg.trim()} className="w-14 h-14 rounded-full flex items-center justify-center bg-[#82C91E] disabled:bg-slate-300 text-[#4B0082] disabled:text-slate-500 shadow-lg active:scale-90 transition-transform shrink-0">
                                             <Lucide.Send size={24} strokeWidth={2.5}/>
                                         </button>
                                     </form>
@@ -1077,10 +1155,33 @@ const GestorLojaContent = () => {
                 )}
             </AnimatePresence>
 
+            {/* ========================================================= */}
+            {/* MAPA EXPANDIDO (TELA CHEIA) */}
+            {/* ========================================================= */}
+            <AnimatePresence>
+                {mapaExpandido && detalhesPedido && (
+                    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="fixed inset-0 z-[6000] bg-white flex flex-col">
+                        <header className="bg-[#1F0137] p-5 pt-8 text-white flex justify-between items-center shadow-lg z-10 shrink-0">
+                            <div>
+                                <h2 className="font-[1000] uppercase italic text-xl tracking-tighter">Rota do Pedido</h2>
+                                <p className="text-[10px] font-black text-[#82C91E] tracking-widest uppercase">Visualização Dinâmica</p>
+                            </div>
+                            <button onClick={() => setMapaExpandido(false)} className="bg-white/10 hover:bg-white/20 p-3 rounded-xl active:scale-90 transition-transform">
+                                <Lucide.X size={20}/>
+                            </button>
+                        </header>
+                        <div className="flex-1 relative bg-slate-100">
+                            {/* Atenção: Certifique-se de que o MotorDeRastreioGestor está declarado no topo como instruído */}
+                            <MotorDeRastreioGestor pedido={detalhesPedido} interativo={true} />
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
         </div>
     );
 };
 
-export default function GestorLojaWrapper() {
+export default function GestorMobileWrapper() {
     return <ToastProvider><GestorLojaContent /></ToastProvider>;
 }

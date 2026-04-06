@@ -1,10 +1,10 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, createContext, useContext, useCallback } from 'react';
 import { db, auth } from '../services/firebase'; 
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, signOut, onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, orderBy, serverTimestamp, increment, addDoc, arrayUnion } from "firebase/firestore";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
 import * as Lucide from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MapContainer, TileLayer, Marker, Polyline, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Howl } from 'howler';
@@ -12,684 +12,671 @@ import { Howl } from 'howler';
 // --- CAPACITOR (HARDWARE REAL) ---
 import { Geolocation } from '@capacitor/geolocation';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
-import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
-import { App } from '@capacitor/app';
 import { Network } from '@capacitor/network';
-import { PushNotifications } from '@capacitor/push-notifications';
 import { registerPlugin } from '@capacitor/core';
-
 const BackgroundGeolocation = registerPlugin('BackgroundGeolocation');
 
 // ========================================================================
-// 1. CONFIGURAÇÕES E ASSETS GERAIS
+// 1. CONFIGURAÇÕES GERAIS E ASSETS
 // ========================================================================
 const IMG_WELCOME = "https://res.cloudinary.com/dbd9x1o02/image/upload/v1775159380/rodrigues_geral/fjm4ioufyglqbmmy2gn5.png";
 const SOUND_ALARM = 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3';
-const LOJA_COORDS = [-20.4697, -54.6201]; 
+const LOJA_COORDS = { lat: -20.4697, lng: -54.6201 }; 
 const CLOUDINARY_URL = "https://api.cloudinary.com/v1_1/dbd9x1o02/image/upload";
 const UPLOAD_PRESET = "fc3i8urq";
 
+// Mapas Temáticos
+const MAPA_DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+const MAPA_LIGHT = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+
 // Ícones do Mapa
 const iconLoja = new L.DivIcon({ className: 's-icon', html: `<div class="w-10 h-10 bg-[#4B0082] rounded-xl border-2 border-[#82C91E] flex items-center justify-center shadow-lg"><div class="w-3 h-3 bg-[#82C91E] rounded-full animate-pulse"></div></div>`, iconSize: [40, 40], iconAnchor: [20, 20] });
-const iconEntrega = new L.DivIcon({ className: 'e-icon', html: `<div class="w-10 h-10 bg-[#EA1D2C] rounded-xl border-2 border-white flex items-center justify-center shadow-lg"><div class="w-3 h-3 bg-white rounded-full"></div></div>`, iconSize: [40, 40], iconAnchor: [20, 20] });
+const iconEntrega = new L.DivIcon({ className: 'e-icon', html: `<div class="w-10 h-10 bg-[#EA1D2C] rounded-xl border-2 border-white flex items-center justify-center shadow-[0_0_15px_rgba(234,29,44,0.6)] animate-pulse"><div class="w-3 h-3 bg-white rounded-full"></div></div>`, iconSize: [40, 40], iconAnchor: [20, 20] });
+const iconMoto = new L.DivIcon({ className: 'm-icon', html: `<div class="w-12 h-12 bg-[#82C91E] rounded-full border-4 border-white shadow-xl flex items-center justify-center"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4B0082" stroke-width="3"><path d="M12 2a9 9 0 0 0-9 9v3.5a2.5 2.5 0 0 0 2.5 2.5h13a2.5 2.5 0 0 0 2.5-2.5V11a9 9 0 0 0-9-9Z"/><path d="M8.5 17v-4a3.5 3.5 0 0 1 7 0v4"/></svg></div>`, iconSize: [48, 48], iconAnchor: [24, 48] });
 
 // ========================================================================
-// 2. FUNÇÕES TRADUTORAS E MATEMÁTICAS
+// 2. SISTEMA DE TEMAS E NOTIFICAÇÕES TÁTEIS
 // ========================================================================
-const UTILS = {
-    formatarMoeda: (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0),
-    mascararCPF: (v) => v?.replace(/\D/g, '').slice(0, 11).replace(/(\d{3})(\d{3})(\d{3})(\d{2})/g, "$1.$2.$3-$4") || '',
-    limparDados: (v) => v?.replace(/\D/g, '') || '',
-    vibrar: (padrao) => { if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(padrao); },
-    abrirMaps: (end) => { if(end?.lat && end?.lng) window.open(`http://googleusercontent.com/maps.google.com/maps?q=${end.lat},${end.lng}`, '_system'); },
-    abrirZap: (tel, nome) => { if(tel) window.open(`https://wa.me/55${tel.replace(/\D/g, '')}?text=${encodeURIComponent(`Olá ${nome || ''}, aqui é o piloto da Rodrigues Açaí! Estou a caminho.`)}`, '_blank'); }
+const ThemeContext = createContext(null);
+const ToastContext = createContext(null);
+
+export const useToast = () => useContext(ToastContext);
+
+const AppProviders = ({ children }) => {
+    const [isDark, setIsDark] = useState(() => {
+        const saved = localStorage.getItem('piloto_theme');
+        return saved !== null ? JSON.parse(saved) : true;
+    });
+
+    useEffect(() => { localStorage.setItem('piloto_theme', JSON.stringify(isDark)); }, [isDark]);
+
+    const [toasts, setToasts] = useState([]);
+    const addToast = useCallback((msg, type = 'info') => {
+        const id = Math.random().toString(36).substr(2, 9);
+        setToasts(prev => [...prev, { id, msg, type }]);
+        try { Haptics.impact({ style: ImpactStyle.Medium }); } catch(e){} // Vibração Nativa
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+    }, []);
+
+    const theme = {
+        isDark, toggle: () => setIsDark(!isDark),
+        bg: isDark ? 'bg-[#0a0a0a]' : 'bg-[#F4F6F8]',
+        card: isDark ? 'bg-[#141414]' : 'bg-white',
+        text: isDark ? 'text-white' : 'text-slate-900',
+        textMuted: isDark ? 'text-slate-400' : 'text-slate-500',
+        border: isDark ? 'border-white/10' : 'border-slate-200',
+        input: isDark ? 'bg-white/5 border-white/10 text-white placeholder:text-white/30' : 'bg-slate-50 border-slate-200 text-[#4B0082] placeholder:text-slate-400',
+        mapStyle: isDark ? MAPA_DARK : MAPA_LIGHT
+    };
+
+    return (
+        <ThemeContext.Provider value={theme}>
+            <ToastContext.Provider value={addToast}>
+                <div className={`${theme.bg} ${theme.text} min-h-[100dvh] transition-colors duration-500 font-sans`}>
+                    {children}
+                    <div className="fixed top-safe pt-4 left-0 right-0 z-[99999] flex flex-col items-center gap-3 pointer-events-none px-4">
+                        <AnimatePresence>
+                            {toasts.map(t => (
+                                <motion.div key={t.id} initial={{ opacity: 0, y: -50, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -50, scale: 0.9 }}
+                                    className={`w-full max-w-sm p-4 rounded-2xl shadow-2xl flex items-center gap-4 text-xs font-black uppercase tracking-wide border-b-4 
+                                    ${t.type === 'error' ? 'bg-[#EA1D2C] text-white border-red-900' : t.type === 'success' ? 'bg-[#82C91E] text-[#4B0082] border-green-700' : isDark ? 'bg-slate-800 text-white border-slate-950' : 'bg-white text-slate-800 border-slate-200'}`}>
+                                    {t.type === 'error' ? <Lucide.AlertTriangle size={24}/> : t.type === 'success' ? <Lucide.CheckCircle size={24}/> : <Lucide.Info size={24}/>}
+                                    <div className="flex-1 leading-tight">{t.msg}</div>
+                                </motion.div>
+                            ))}
+                        </AnimatePresence>
+                    </div>
+                </div>
+            </ToastContext.Provider>
+        </ThemeContext.Provider>
+    );
 };
 
-// Cálculo exato de KM entre duas coordenadas (Haversine)
-const calcularDistancia = (lat1, lon1, lat2, lon2) => {
-    if (!lat1 || !lon1 || !lat2 || !lon2) return "0.0";
-    const R = 6371; 
-    const dLat = (lat2 - lat1) * Math.PI / 180; 
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return (R * c).toFixed(1);
+// ========================================================================
+// 3. COMPONENTE MAPA DINÂMICO (OSRM ROUTING)
+// ========================================================================
+function MapUpdater({ bounds }) {
+    const map = useMap();
+    useEffect(() => { if (bounds?.length > 0) map.fitBounds(bounds, { padding: [50, 50], animate: true }); }, [bounds, map]);
+    return null;
+}
+
+const LiveMapDriver = ({ pedido, myLocation }) => {
+    const theme = useContext(ThemeContext);
+    const [rota, setRota] = useState([]);
+    const destLat = pedido?.endereco?.lat;
+    const destLng = pedido?.endereco?.lng;
+
+    useEffect(() => {
+        if (!myLocation || !destLat) return;
+        const fetchRoute = async () => {
+            try {
+                const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${myLocation.lng},${myLocation.lat};${destLng},${destLat}?overview=full&geometries=geojson`);
+                const data = await res.json();
+                if (data.routes?.[0]) setRota(data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]));
+            } catch (e) {}
+        };
+        fetchRoute();
+    }, [myLocation?.lat, myLocation?.lng, destLat, destLng]);
+
+    const bounds = myLocation && destLat ? [[myLocation.lat, myLocation.lng], [destLat, destLng]] : [];
+
+    return (
+        <MapContainer center={[LOJA_COORDS.lat, LOJA_COORDS.lng]} zoom={15} zoomControl={false} className={`w-full h-full z-0 ${theme.isDark ? 'bg-[#0a0a0a]' : 'bg-[#e5e5e5]'}`}>
+            <TileLayer url={theme.mapStyle} />
+            <Marker position={[LOJA_COORDS.lat, LOJA_COORDS.lng]} icon={iconLoja} />
+            {destLat && <Marker position={[destLat, destLng]} icon={iconEntrega} />}
+            {myLocation && <Marker position={[myLocation.lat, myLocation.lng]} icon={iconMoto} />}
+            {rota.length > 0 && <Polyline positions={rota} color="#82C91E" weight={6} opacity={0.8} dashArray="10, 10" />}
+            <MapUpdater bounds={bounds} />
+        </MapContainer>
+    );
 };
-
-// Proteção para puxar as taxas do Firebase
-const obterTaxa = (p) => parseFloat(p?.valores?.taxaEntrega || p?.taxaEntrega || p?.frete || p?.valores?.frete || 0);
-const obterTotal = (p) => parseFloat(p?.valores?.total || p?.total || 0);
-const obterEndereco = (p) => ({
-    rua: p?.endereco?.rua || 'Endereço não informado',
-    numero: p?.endereco?.numero || 'S/N',
-    bairro: p?.endereco?.bairro || '',
-    lat: p?.endereco?.latlng?.lat || p?.endereco?.lat || null,
-    lng: p?.endereco?.latlng?.lng || p?.endereco?.lng || null
-});
-const obterCliente = (p) => ({
-    nome: p?.cliente?.nome || 'Cliente Local',
-    telefone: p?.cliente?.telefone || ''
-});
-
-// ========================================================================
-// 3. COMPONENTES VISUAIS REUTILIZÁVEIS
-// ========================================================================
-const LoaderGlobal = ({ mensagem }) => (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[9999] bg-[#4B0082]/80 backdrop-blur-sm flex flex-col items-center justify-center">
-        <div className="bg-white p-8 rounded-3xl shadow-2xl flex flex-col items-center border-b-4 border-[#82C91E]">
-            <Lucide.Loader2 size={40} className="animate-spin text-[#4B0082] mb-4" />
-            <p className="text-[#4B0082] font-black uppercase tracking-widest text-[11px] animate-pulse">{mensagem || 'A processar...'}</p>
-        </div>
-    </motion.div>
-);
 
 // ========================================================================
 // 4. APLICAÇÃO PRINCIPAL (APP ENTREGADOR)
 // ========================================================================
-export default function EntregadorMobile() {
-    const [secao, setSecao] = useState('LOADING'); 
+const PilotoApp = () => {
+    const theme = useContext(ThemeContext);
+    const toast = useToast();
+    
+    // Auth & Navigation States
+    const [secao, setSecao] = useState('LOADING'); // LOADING | INTRO | APP
     const [abaAtiva, setAbaAtiva] = useState('RADAR'); 
     const [loadingMsg, setLoadingMsg] = useState('');
-    const [mostrarMapaModal, setMostrarMapaModal] = useState(false);
-    
-    // Auth e Usuário
     const [isLoginModo, setIsLoginModo] = useState(true);
-    const [form, setForm] = useState({ cpf: '', senha: '', nome: '', veiculo: 'MOTO', placa: '', telefone: '' });
+    
+    // Form & User
+    const [form, setForm] = useState({ email: '', senha: '', nome: '', veiculo: '', placa: '', telefone: '' });
     const [piloto, setPiloto] = useState(null);
     
     // Operacional
     const [isOnline, setIsOnline] = useState(false);
+    const [myLocation, setMyLocation] = useState(null);
     const [ofertaLeilao, setOfertaLeilao] = useState(null);
     const [pedidoAtivo, setPedidoAtivo] = useState(null);
-    const [chatMsgs, setChatMsgs] = useState([]);
-    const [novaMsg, setNovaMsg] = useState('');
-    const [temInternet, setTemInternet] = useState(true);
-    const [pixInput, setPixInput] = useState('');
-
+    const [historico, setHistorico] = useState([]);
+    
+    // Controles UI
+    const [tokenInput, setTokenInput] = useState("");
+    const [isSOS, setIsSOS] = useState(false);
+    
     // Refs
-    const audioAlarmeRef = useRef(null);
     const watchGpsRef = useRef(null);
+    const audioAlarmeRef = useRef(null);
     const cameraInputRef = useRef(null);
-    const [pedidoParaFinalizar, setPedidoParaFinalizar] = useState(null);
 
+    // Helpers
+    const formatarMoeda = (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0);
+
+    // INICIALIZAÇÃO
     useEffect(() => {
         try { audioAlarmeRef.current = new Howl({ src: [SOUND_ALARM], loop: true, volume: 1.0 }); } catch(e){}
-        Network.getStatus().then(status => setTemInternet(status.connected));
-        const networkListener = Network.addListener('networkStatusChange', status => setTemInternet(status.connected));
 
-        const authListener = auth.onAuthStateChanged(user => {
+        const authListener = onAuthStateChanged(auth, async (user) => {
             if (!user) { setPiloto(null); setSecao('INTRO'); return; }
-            const cpfLogado = user.email ? user.email.split('@')[0] : localStorage.getItem('@UP:cpf');
-            if (!cpfLogado) { auth.signOut(); setSecao('INTRO'); return; }
-
-            onSnapshot(doc(db, "entregadores", cpfLogado), snap => {
+            
+            onSnapshot(doc(db, "entregadores", user.uid), snap => {
                 if (snap.exists()) {
                     const data = snap.data();
                     setPiloto({ id: snap.id, uid: user.uid, ...data });
                     setIsOnline(data.status !== 'Offline');
-                    if (data.chavePix) setPixInput(data.chavePix);
                     setSecao('APP');
-                } else { setSecao('INTRO'); }
+                } else {
+                    // Preenche dados vindos do Google Auth
+                    const newData = { nome: user.displayName || 'Piloto', email: user.email, foto: user.photoURL, status: 'Offline', statusAprovacao: 'PENDENTE', ganhosTaxas: 0, debitosLoja: 0, saldoLiquido: 0, totalEntregas: 0, createdAt: serverTimestamp() };
+                    setDoc(doc(db, "entregadores", user.uid), newData).then(() => setSecao('APP'));
+                }
             });
         });
-        return () => { authListener(); networkListener.then(l => l.remove()); };
+        return () => authListener();
     }, []);
 
-    const handleAuth = async (e) => {
-        e.preventDefault(); setLoadingMsg('A autenticar...');
-        const cpfLimpo = UTILS.limparDados(form.cpf);
-        const emailStr = `${cpfLimpo}@rodrigues.com`;
-        try {
-            const docRef = doc(db, "entregadores", cpfLimpo);
-            const snap = await getDoc(docRef);
-
-            if (isLoginModo) {
-                if (snap.exists() && snap.data().senha === form.senha) {
-                    localStorage.setItem('@UP:cpf', cpfLimpo);
-                    try { await signInWithEmailAndPassword(auth, emailStr, form.senha); } catch(err) { await createUserWithEmailAndPassword(auth, emailStr, form.senha); }
-                } else { alert("CPF ou Senha incorretos."); }
-            } else {
-                if (snap.exists()) { alert("Este CPF já está registado."); }
-                else {
-                    const payload = {
-                        nome: form.nome, telefone: UTILS.limparDados(form.telefone), senha: form.senha, 
-                        modalidade: form.veiculo, placa: form.placa, statusAprovacao: 'PENDENTE', status: 'Offline',
-                        ganhosTaxas: 0, debitosLoja: 0, saldoLiquido: 0, totalEntregas: 0, dataCadastro: serverTimestamp(),
-                        aceitaDinheiro: true, temMaquininha: true, frequenciaRepasse: 'SEMANAL', modoVoltarCasa: false, setorPreferencia: 'C'
-                    };
-                    await setDoc(docRef, payload);
-                    const cred = await createUserWithEmailAndPassword(auth, emailStr, form.senha);
-                    await updateDoc(docRef, { uid: cred.user.uid });
-                    alert("Registo efetuado! Aguarde a aprovação.");
-                    setIsLoginModo(true);
-                }
-            }
-        } catch (err) { alert("Erro de rede."); } finally { setLoadingMsg(''); }
-    };
-
+    // MOTOR DE ROTAS E LEILÃO
     useEffect(() => {
         if (!piloto || secao !== 'APP') return;
-        const qPedidos = query(collection(db, "pedidos"), where("status", "in", ["BUSCANDO_ENTREGADOR", "A_CAMINHO_LOJA", "AGUARDANDO_COLETA", "SAIU_ENTREGA", "ENTREGADOR_NO_LOCAL"]));
-        const unsubPedidos = onSnapshot(qPedidos, snap => {
-            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            const ativ = docs.find(p => p.entregadorId === piloto.id);
-            setPedidoAtivo(ativ || null);
-
-            if (!ativ && isOnline) {
-                const leiloes = docs.filter(p => p.status === 'BUSCANDO_ENTREGADOR' && !p.entregadoresRecusaram?.includes(piloto.id));
-                if (leiloes.length > 0) {
-                    if (!ofertaLeilao || ofertaLeilao.id !== leiloes[0].id) {
-                        setOfertaLeilao(leiloes[0]);
-                        audioAlarmeRef.current?.play().catch(()=>{}); 
-                        UTILS.vibrar([200, 100, 200, 100, 500]);
-                    }
-                } else { setOfertaLeilao(null); audioAlarmeRef.current?.stop(); }
-            } else { setOfertaLeilao(null); audioAlarmeRef.current?.stop(); }
-        });
-
-        const unsubChat = onSnapshot(query(collection(db, `entregadores/${piloto.id}/mensagens`), orderBy("timestamp", "asc")), snap => {
-            setChatMsgs(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-        });
-
-        return () => { unsubPedidos(); unsubChat(); };
-    }, [piloto?.id, isOnline, secao, ofertaLeilao?.id]);
-
-    const alternarStatusGps = async () => {
-        if (!piloto) return;
-        if (piloto.statusAprovacao !== 'APROVADO') return alert("O seu perfil ainda está em análise.");
-        setLoadingMsg('A processar...');
-        try {
-            if (!isOnline) {
-                try { await Geolocation.requestPermissions(); } catch(e){} 
-                try {
-                    BackgroundGeolocation.addWatcher(
-                        { backgroundMessage: "App rodando", backgroundTitle: "Buscando", requestPermissions: true, stale: false, distanceFilter: 10 },
-                        (location, error) => { if (!error) updateDoc(doc(db, "entregadores", piloto.id), { coords: { lat: location.latitude, lng: location.longitude } }).catch(()=>{}); }
-                    ).then(id => { watchGpsRef.current = id; });
-                } catch(e) { console.log("Background indisponível."); }
-
-                setIsOnline(true);
-                await updateDoc(doc(db, "entregadores", piloto.id), { status: 'Livre' });
-                try { Haptics.impact({ style: ImpactStyle.Heavy }); } catch(e){}
+        
+        // 1. Pedido Ativo (Rota Atual)
+        const qAtivo = query(collection(db, "pedidos"), where("entregadorId", "==", piloto.id), where("status", "in", ["A_CAMINHO_LOJA", "AGUARDANDO_COLETA", "SAIU_ENTREGA", "ENTREGADOR_NO_LOCAL"]));
+        const unsubAtivo = onSnapshot(qAtivo, snap => {
+            if (!snap.empty) {
+                setPedidoAtivo({ id: snap.docs[0].id, ...snap.docs[0].data() });
+                setAbaAtiva('ROTA');
+                setOfertaLeilao(null);
+                audioAlarmeRef.current?.stop();
             } else {
-                setIsOnline(false); setOfertaLeilao(null); audioAlarmeRef.current?.stop();
-                try { if (watchGpsRef.current) BackgroundGeolocation.removeWatcher({ id: watchGpsRef.current }); } catch(e){}
-                await updateDoc(doc(db, "entregadores", piloto.id), { status: 'Offline' });
-                try { Haptics.impact({ style: ImpactStyle.Light }); } catch(e){}
+                setPedidoAtivo(null);
+                if (abaAtiva === 'ROTA') setAbaAtiva('RADAR');
             }
-        } catch(e) { alert("Ative o GPS."); } finally { setLoadingMsg(''); }
+        });
+
+        // 2. Leilão (Ofertas)
+        const qOfertas = query(collection(db, "pedidos"), where("status", "==", "PRONTO"), where("statusDespacho", "==", "OFERTA_INDIVIDUAL"));
+        const unsubOfertas = onSnapshot(qOfertas, snap => {
+            if (!isOnline || pedidoAtivo) return;
+            const disponiveis = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(p => p.entregadorAtualOferta === piloto.id);
+            
+            if (disponiveis.length > 0) {
+                if (!ofertaLeilao || ofertaLeilao.id !== disponiveis[0].id) {
+                    setOfertaLeilao(disponiveis[0]);
+                    audioAlarmeRef.current?.play().catch(()=>{}); 
+                    try { Haptics.impact({ style: ImpactStyle.Heavy }); } catch(e){}
+                }
+            } else {
+                setOfertaLeilao(null);
+                audioAlarmeRef.current?.stop();
+            }
+        });
+
+        // 3. Histórico do Dia
+        const inicioDoDia = new Date(); inicioDoDia.setHours(0,0,0,0);
+        const qHist = query(collection(db, "pedidos"), where("entregadorId", "==", piloto.id), where("status", "==", "CONCLUIDO"));
+        const unsubHist = onSnapshot(qHist, snap => {
+            setHistorico(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(p => p.horarioConcluido?.toDate() >= inicioDoDia));
+        });
+
+        return () => { unsubAtivo(); unsubOfertas(); unsubHist(); };
+    }, [piloto?.id, isOnline, secao, abaAtiva, pedidoAtivo, ofertaLeilao?.id]);
+
+    // BACKGROUND GPS
+    useEffect(() => {
+        if (isOnline && piloto) {
+            try { Geolocation.requestPermissions(); } catch(e){} 
+            if ("geolocation" in navigator) {
+                watchGpsRef.current = navigator.geolocation.watchPosition(
+                    async (position) => {
+                        const { latitude, longitude } = position.coords;
+                        setMyLocation({ lat: latitude, lng: longitude });
+                        updateDoc(doc(db, "entregadores", piloto.id), { coords: { lat: latitude, lng: longitude }, lastUpdate: serverTimestamp() }).catch(()=>{});
+                    },
+                    (error) => toast("GPS Desativado! As lojas não vão te encontrar.", "error"),
+                    { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+                );
+            }
+        } else {
+            if (watchGpsRef.current) navigator.geolocation.clearWatch(watchGpsRef.current);
+        }
+        return () => { if (watchGpsRef.current) navigator.geolocation.clearWatch(watchGpsRef.current); };
+    }, [isOnline, piloto, toast]);
+
+    // ========================================================================
+    // AÇÕES DO PILOTO
+    // ========================================================================
+    const handleAuth = async (e) => {
+        e.preventDefault(); setLoadingMsg('Autenticando...');
+        try {
+            if (isLoginModo) {
+                await signInWithEmailAndPassword(auth, form.email, form.senha);
+            } else {
+                const cred = await createUserWithEmailAndPassword(auth, form.email, form.senha);
+                await setDoc(doc(db, "entregadores", cred.user.uid), {
+                    nome: form.nome, email: form.email, telefone: form.telefone.replace(/\D/g, ''), veiculo: form.veiculo, placa: form.placa.toUpperCase(),
+                    statusAprovacao: 'PENDENTE', status: 'Offline', ganhosTaxas: 0, debitosLoja: 0, saldoLiquido: 0, totalEntregas: 0, createdAt: serverTimestamp()
+                });
+                toast("Conta criada! Aguarde aprovação da loja.", "success");
+            }
+        } catch (err) { toast(err.message.includes('auth/') ? "Email ou Senha inválidos." : "Erro de Conexão", "error"); } 
+        finally { setLoadingMsg(''); }
+    };
+
+    const loginGoogle = async () => {
+        try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch(e) { toast("Erro no Google Auth", "error"); }
+    };
+
+    const resetSenha = async () => {
+        const em = prompt("Digite seu e-mail de recuperação:");
+        if(em) { sendPasswordResetEmail(auth, em).then(()=>toast("E-mail de recuperação enviado!", "success")).catch(()=>toast("E-mail não encontrado.", "error")); }
+    };
+
+    const alternarStatus = async () => {
+        if (!piloto) return;
+        if (piloto.statusAprovacao !== 'APROVADO') return toast("Sua conta está em Análise.", "error");
+        
+        setLoadingMsg('Sincronizando...');
+        try {
+            const novoStatus = isOnline ? 'Offline' : 'Livre';
+            await updateDoc(doc(db, "entregadores", piloto.id), { status: novoStatus });
+            setIsOnline(!isOnline);
+            toast(isOnline ? "Você está Offline." : "Online! Aguardando corridas.", isOnline ? "info" : "success");
+        } catch(e) { toast("Erro de conexão.", "error"); } 
+        finally { setLoadingMsg(''); }
     };
 
     const aceitarMissao = async () => {
         if (!ofertaLeilao || !piloto) return;
-        setLoadingMsg('A confirmar...');
+        setLoadingMsg('Confirmando Rota...');
         try {
             audioAlarmeRef.current?.stop();
-            await updateDoc(doc(db, "pedidos", ofertaLeilao.id), { 
-                status: 'A_CAMINHO_LOJA', entregadorId: piloto.id,
-                nomeEntregador: (piloto.nome || 'Piloto').split(' ')[0], veiculoEntregador: piloto.modalidade || 'Moto',
-                telefoneEntregador: piloto.telefone || '', horarioAceite: serverTimestamp() 
-            });
+            await updateDoc(doc(db, "pedidos", ofertaLeilao.id), { status: 'A_CAMINHO_LOJA', entregadorId: piloto.id, statusDespacho: 'Aceito pelo Piloto', horarioAceite: serverTimestamp() });
             await updateDoc(doc(db, "entregadores", piloto.id), { status: 'Em Rota' });
-            setOfertaLeilao(null); setAbaAtiva('RADAR'); UTILS.vibrar(100);
-        } catch(e) { alert("Missão expirada."); setOfertaLeilao(null); } finally { setLoadingMsg(''); }
+            setOfertaLeilao(null);
+            toast("Rota Confirmada! Vá até a loja.", "success");
+        } catch(e) { toast("A Rota expirou ou foi cancelada.", "error"); setOfertaLeilao(null); } 
+        finally { setLoadingMsg(''); }
     };
 
     const recusarMissao = async () => {
-        audioAlarmeRef.current?.stop(); UTILS.vibrar(50);
-        if (ofertaLeilao && piloto) await updateDoc(doc(db, "pedidos", ofertaLeilao.id), { entregadoresRecusaram: arrayUnion(piloto.id) }).catch(()=>{});
-        setOfertaLeilao(null);
+        audioAlarmeRef.current?.stop(); setOfertaLeilao(null);
+        if (ofertaLeilao && piloto) await updateDoc(doc(db, "pedidos", ofertaLeilao.id), { statusDespacho: 'Rejeitado pelo Piloto' }).catch(()=>{});
     };
 
-    const atualizarStatusCorrida = async (novoStatus) => {
+    const atualizarCorrida = async (novoStatus) => {
         if(!pedidoAtivo) return;
-        setLoadingMsg('A atualizar...');
-        try { await updateDoc(doc(db, "pedidos", pedidoAtivo.id), { status: novoStatus, statusAtualizadoEm: serverTimestamp() }); UTILS.vibrar(50); } 
-        catch(e) { alert("Falha na rede."); } finally { setLoadingMsg(''); }
+        setLoadingMsg('Atualizando...');
+        try { 
+            await updateDoc(doc(db, "pedidos", pedidoAtivo.id), { status: novoStatus, statusAtualizadoEm: serverTimestamp() }); 
+            try { Haptics.impact({ style: ImpactStyle.Light }); } catch(e){}
+        } catch(e) { toast("Falha de conexão.", "error"); } 
+        finally { setLoadingMsg(''); }
     };
 
-    const tirarFotoProva = (pedido) => {
-        setPedidoParaFinalizar(pedido);
-        if(cameraInputRef.current) cameraInputRef.current.click();
+    const concluirCorrida = async (urlFoto = null) => {
+        if (!pedidoAtivo) return;
+        if (pedidoAtivo.codigoEntrega && tokenInput !== pedidoAtivo.codigoEntrega) return toast("O Token informado está incorreto!", "error");
+
+        setLoadingMsg('Fechando Rota...');
+        try {
+            const taxa = Number(pedidoAtivo.valores?.taxa || 0);
+            const totalPgto = Number(pedidoAtivo.valores?.total || 0);
+            const isDinheiro = pedidoAtivo.pagamento?.metodo?.toUpperCase().includes('DINHEIRO');
+            const isMaquininha = pedidoAtivo.pagamento?.metodo?.toUpperCase().includes('CARTÃO') || pedidoAtivo.pagamento?.metodo?.toUpperCase().includes('MAQUININHA');
+            const debitoLoja = (isDinheiro || isMaquininha) ? totalPgto : 0;
+
+            let updatePayload = { status: 'CONCLUIDO', horarioConcluido: serverTimestamp() };
+            if (urlFoto) updatePayload.provaEntregaUrl = urlFoto;
+
+            await updateDoc(doc(db, "pedidos", pedidoAtivo.id), updatePayload);
+            await updateDoc(doc(db, "entregadores", piloto.id), { status: 'Livre', ganhosTaxas: increment(taxa), debitosLoja: increment(debitoLoja), saldoLiquido: increment(taxa - debitoLoja), totalEntregas: increment(1) });
+            
+            toast("Rota Finalizada! Excelente.", "success");
+            setTokenInput(""); setPedidoAtivo(null); setAbaAtiva('RADAR');
+        } catch (e) { toast("Erro ao concluir", "error"); } 
+        finally { setLoadingMsg(''); }
     };
 
-    const finalizarComFoto = async (e) => {
+    const processarFoto = async (e) => {
         const file = e.target.files[0];
-        if (!file || !pedidoParaFinalizar || !piloto) return;
-        
-        setLoadingMsg('Calculando ganhos...');
+        if (!file || !pedidoAtivo) return;
+        setLoadingMsg('Enviando Comprovante...');
         try {
             const formData = new FormData(); formData.append("file", file); formData.append("upload_preset", UPLOAD_PRESET); formData.append("folder", "rodrigues_acai/provas");
             const res = await fetch(CLOUDINARY_URL, { method: "POST", body: formData });
             const json = await res.json();
-            
-            const taxa = obterTaxa(pedidoParaFinalizar);
-            const total = obterTotal(pedidoParaFinalizar);
-            const metodoPgto = (pedidoParaFinalizar.pagamento?.metodo || '').toUpperCase();
-            const debitoLoja = (metodoPgto.includes('DINHEIRO') || metodoPgto.includes('MAQUININHA')) ? total : 0;
-
-            await updateDoc(doc(db, "pedidos", pedidoParaFinalizar.id), { status: 'CONCLUIDO', provaEntregaUrl: json.secure_url, horarioConclusao: serverTimestamp() });
-            await updateDoc(doc(db, "entregadores", piloto.id), { status: 'Livre', ganhosTaxas: increment(taxa), debitosLoja: increment(debitoLoja), saldoLiquido: increment(taxa - debitoLoja), totalEntregas: increment(1) });
-            UTILS.vibrar([100, 50, 100, 50, 200]);
-        } catch (err) { alert("Erro ao enviar imagem."); } finally { setLoadingMsg(''); setPedidoParaFinalizar(null); if(e.target) e.target.value = null; }
+            await concluirCorrida(json.secure_url);
+        } catch (err) { toast("Erro na imagem. Tente apenas pelo Token.", "error"); setLoadingMsg(''); }
     };
-
-    const enviarChat = async (e) => {
-        e.preventDefault(); if (!novaMsg.trim() || !piloto) return;
-        await addDoc(collection(db, `entregadores/${piloto.id}/mensagens`), { texto: novaMsg, remetente: 'PILOTO', timestamp: serverTimestamp() });
-        setNovaMsg('');
-    };
-
-    // FUNÇÕES ESPECIAIS DO DASHBOARD OPERACIONAL
-    const atualizarPerfilConfig = async (campo, valor) => {
-        try {
-            await updateDoc(doc(db, "entregadores", piloto.id), { [campo]: valor });
-            UTILS.vibrar(20);
-        } catch(e) { console.error("Erro ao atualizar config", e); }
-    };
-
-    const acionarSOS = async () => {
-        if(window.confirm("🚨 TEM CERTEZA? Isso enviará um alerta de EMERGÊNCIA para a Base!")) {
-            UTILS.vibrar([500, 200, 500, 200, 1000]);
-            try {
-                await addDoc(collection(db, `entregadores/${piloto.id}/mensagens`), { 
-                    texto: "🚨 ALERTA S.O.S ACIONADO PELO PILOTO! O MOTORISTA PRECISA DE ASSISTÊNCIA IMEDIATA!", 
-                    remetente: 'PILOTO', urgente: true, timestamp: serverTimestamp() 
-                });
-                alert("Alerta enviado com sucesso! A base foi notificada.");
-            } catch (e) { alert("Erro de conexão."); }
-        }
-    };
-
-    const acionarResgate = async () => {
-        const item = window.prompt("O que precisa resgatar? (Ex: Esqueceu a Maquininha, Faltou a Coca...)");
-        if(item && item.trim() !== '') {
-            try {
-                await addDoc(collection(db, `entregadores/${piloto.id}/mensagens`), { 
-                    texto: `🔄 SOLICITAÇÃO DE RESGATE: Preciso resgatar / buscar o seguinte item: ${item}`, 
-                    remetente: 'PILOTO', timestamp: serverTimestamp() 
-                });
-                alert("A base foi notificada sobre o resgate.");
-                setAbaAtiva('CHAT');
-            } catch(e) { alert("Falha ao enviar aviso."); }
-        }
-    };
-
-    const direcoesBussola = [
-        { id: 'NO', label: 'NO' }, { id: 'N', label: 'N' }, { id: 'NE', label: 'NE' },
-        { id: 'O', label: 'O' },   { id: 'C', label: 'QUALQUER' }, { id: 'L', label: 'L' },
-        { id: 'SO', label: 'SO' }, { id: 'S', label: 'S' },   { id: 'SE', label: 'SE' }
-    ];
-
-    // Variáveis úteis para a Rota Ativa
-    const endCliente = pedidoAtivo ? obterEndereco(pedidoAtivo) : null;
-    const temLatLgn = endCliente?.lat && endCliente?.lng;
-    const distReal = temLatLgn ? calcularDistancia(LOJA_COORDS[0], LOJA_COORDS[1], endCliente.lat, endCliente.lng) : "0.0";
 
     // ========================================================================
-    // INTERFACES (UI)
+    // TELAS E RENDERIZAÇÃO
     // ========================================================================
     if (secao === 'LOADING') {
-        return <div className="h-screen bg-[#F4F6F8] flex items-center justify-center"><Lucide.Loader2 size={40} className="animate-spin text-[#4B0082]"/></div>;
+        return <div className={`h-[100dvh] flex items-center justify-center ${theme.bg}`}><Lucide.Loader2 size={40} className={`animate-spin ${theme.textMuted}`}/></div>;
     }
 
     if (secao === 'INTRO') {
-        const inputClass = "w-full h-14 rounded-xl bg-white border border-[#E5D5F5] px-4 text-[#4B0082] font-medium outline-none focus:border-[#82C91E] focus:ring-1 focus:ring-[#82C91E] shadow-sm";
         return (
-            <div className="min-h-[100dvh] flex flex-col font-sans bg-[#F4F6F8] relative">
+            <div className={`min-h-[100dvh] flex flex-col relative overflow-hidden transition-colors ${theme.bg}`}>
                 <AnimatePresence>{loadingMsg && <LoaderGlobal mensagem={loadingMsg} />}</AnimatePresence>
-                <div className="h-[40vh] w-full relative">
-                    <img src={IMG_WELCOME} alt="Fundo" className="w-full h-full object-cover object-top" />
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#F4F6F8] via-transparent to-transparent" />
+                
+                <button onClick={theme.toggle} className="absolute top-6 right-6 z-20 w-12 h-12 rounded-full bg-black/20 backdrop-blur-md flex items-center justify-center active:scale-90 transition-all">
+                    {theme.isDark ? <Lucide.Sun size={20} className="text-yellow-400"/> : <Lucide.Moon size={20} className="text-white"/>}
+                </button>
+
+                <div className="h-[40vh] w-full relative shrink-0">
+                    <img src={IMG_WELCOME} alt="Entregador" className="w-full h-full object-cover object-top" />
+                    <div className={`absolute inset-0 bg-gradient-to-t ${theme.isDark ? 'from-[#0a0a0a]' : 'from-[#F4F6F8]'} via-transparent to-transparent`} />
                 </div>
-                <div className="flex-1 bg-[#F4F6F8] px-6 pb-8 relative z-10 -mt-10 flex flex-col">
+                
+                <div className={`flex-1 px-6 pb-8 relative z-10 -mt-10 flex flex-col ${theme.text}`}>
                     <div className="text-left mb-6">
-                        <h1 className="text-3xl font-extrabold text-[#4B0082] mb-1 tracking-tight">Painel Pilotos</h1>
-                        <p className="text-gray-500 text-sm font-medium">{isLoginModo ? 'Aceda para operar' : 'Faça parte da nossa frota'}</p>
+                        <h1 className="text-4xl font-[1000] italic uppercase tracking-tighter leading-none mb-1">Piloto <span className="text-[#82C91E]">PRO</span></h1>
+                        <p className={`text-xs font-bold uppercase tracking-widest ${theme.textMuted}`}>{isLoginModo ? 'Acesse o painel' : 'Junte-se à frota'}</p>
                     </div>
-                    <form onSubmit={handleAuth} className="space-y-4 flex-1">
-                        {!isLoginModo && <input type="text" placeholder="Nome Completo" value={form.nome} onChange={e=>setForm({...form, nome: e.target.value})} className={inputClass} required />}
-                        <input type="tel" placeholder="CPF" value={UTILS.mascararCPF(form.cpf)} onChange={e=>setForm({...form, cpf: e.target.value})} maxLength={14} className={inputClass} required />
-                        {!isLoginModo && <input type="tel" placeholder="WhatsApp" value={form.telefone} onChange={e=>setForm({...form, telefone: e.target.value})} className={inputClass} required />}
-                        <input type="password" placeholder="Senha" value={form.senha} onChange={e=>setForm({...form, senha: e.target.value})} className={inputClass} required />
-                        {!isLoginModo && <input type="text" placeholder="Matrícula" value={form.placa} onChange={e=>setForm({...form, placa: e.target.value.toUpperCase()})} className={`${inputClass} uppercase`} required />}
-                        <div className="pt-2">
-                            <button type="submit" className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[15px] shadow-md active:scale-95 transition-all">
-                                {isLoginModo ? 'Iniciar Sessão' : 'Concluir Registo'}
+
+                    <form onSubmit={handleAuth} className="space-y-3 flex-1 flex flex-col">
+                        {!isLoginModo && <input type="text" placeholder="Nome Completo" value={form.nome} onChange={e=>setForm({...form, nome: e.target.value})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2`} required />}
+                        <input type="email" placeholder="E-mail" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2`} required />
+                        {!isLoginModo && <input type="tel" placeholder="WhatsApp (Apenas números)" value={form.telefone} onChange={e=>setForm({...form, telefone: e.target.value})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2`} required />}
+                        <input type="password" placeholder="Senha" value={form.senha} onChange={e=>setForm({...form, senha: e.target.value})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2`} required />
+                        {!isLoginModo && <div className="flex gap-3">
+                            <input type="text" placeholder="Veículo (Ex: Moto Fan)" value={form.veiculo} onChange={e=>setForm({...form, veiculo: e.target.value})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2`} required />
+                            <input type="text" placeholder="Placa" value={form.placa} onChange={e=>setForm({...form, placa: e.target.value.toUpperCase()})} className={`w-full h-14 rounded-2xl px-5 text-sm font-bold outline-none focus:border-[#82C91E] ${theme.input} transition-colors border-2 uppercase`} required />
+                        </div>}
+
+                        <button type="submit" className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-2xl font-[1000] uppercase text-[12px] tracking-widest shadow-[0_0_30px_rgba(130,201,30,0.3)] mt-2 active:scale-95 transition-transform">
+                            {isLoginModo ? 'Iniciar Sessão' : 'Enviar Cadastro'}
+                        </button>
+                    </form>
+
+                    <div className="mt-6 space-y-4">
+                        {isLoginModo && (
+                            <button onClick={loginGoogle} className={`w-full h-14 ${theme.card} border-2 ${theme.border} rounded-2xl font-[1000] uppercase text-[11px] tracking-widest flex items-center justify-center gap-3 shadow-md active:scale-95 transition-all`}>
+                                <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg> Google
+                            </button>
+                        )}
+                        <div className="flex justify-between items-center px-2">
+                            {isLoginModo && <button onClick={resetSenha} className={`text-[10px] font-black uppercase tracking-widest ${theme.textMuted} hover:text-[#82C91E]`}>Esqueci a Senha</button>}
+                            <button onClick={() => setIsLoginModo(!isLoginModo)} className="text-[10px] font-black uppercase tracking-widest text-[#4B0082] ml-auto">
+                                {isLoginModo ? 'Criar Conta Nova' : 'Já tenho conta'}
                             </button>
                         </div>
-                    </form>
-                    <button onClick={() => setIsLoginModo(!isLoginModo)} className="w-full mt-6 text-[#4B0082] font-bold text-sm">
-                        {isLoginModo ? 'Criar conta' : 'Já tenho conta'}
-                    </button>
+                    </div>
                 </div>
             </div>
         );
     }
 
     return (
-        <div className="flex flex-col h-[100dvh] w-full font-sans bg-[#F4F6F8] text-[#333333] overflow-hidden relative">
-            <input type="file" accept="image/*" capture="environment" ref={cameraInputRef} onChange={finalizarComFoto} className="hidden" />
+        <div className={`flex flex-col h-[100dvh] w-full ${theme.bg} ${theme.text} overflow-hidden relative transition-colors font-sans`}>
+            <input type="file" accept="image/*" capture="environment" ref={cameraInputRef} onChange={processarFoto} className="hidden" />
             <AnimatePresence>{loadingMsg && <LoaderGlobal mensagem={loadingMsg} />}</AnimatePresence>
-            {!temInternet && (
-                <motion.div initial={{ y: -50 }} animate={{ y: 0 }} className="absolute top-0 z-[10000] w-full bg-red-600 text-white text-center py-2 font-semibold text-[11px] shadow-sm">
-                    Sem ligação à internet
-                </motion.div>
-            )}
 
-            {/* MODAL FULL-SCREEN DO MAPA INTERATIVO (RETRO) */}
-            <AnimatePresence>
-                {mostrarMapaModal && temLatLgn && (
-                    <motion.div initial={{ opacity: 0, y: "100%" }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: "100%" }} transition={{ type: "spring", damping: 25, stiffness: 200 }} className="fixed inset-0 z-[99999] bg-[#F4F6F8] flex flex-col">
-                        <div className="p-5 bg-[#4B0082] text-white flex justify-between items-center shadow-lg relative z-10 rounded-b-3xl">
-                            <div>
-                                <h3 className="font-extrabold text-xl">Rota da Entrega</h3>
-                                <p className="text-[11px] font-bold text-[#82C91E] uppercase tracking-widest mt-0.5">Total a percorrer: {distReal} KM</p>
-                            </div>
-                            <button onClick={() => setMostrarMapaModal(false)} className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center active:scale-90 transition-all border border-white/20"><Lucide.X size={24}/></button>
-                        </div>
-                        
-                        <div className="flex-1 relative z-0 retro-map-tiles">
-                            <MapContainer center={LOJA_COORDS} zoom={13} className="w-full h-full" zoomControl={false}>
-                                <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-                                <Marker position={LOJA_COORDS} icon={iconLoja}><Popup className="font-bold">Base Rodrigues</Popup></Marker>
-                                <Marker position={[endCliente.lat, endCliente.lng]} icon={iconEntrega}><Popup className="font-bold">{obterCliente(pedidoAtivo).nome}</Popup></Marker>
-                                <Polyline positions={[LOJA_COORDS, [endCliente.lat, endCliente.lng]]} color="#4B0082" weight={4} dashArray="5, 10" />
-                            </MapContainer>
-                            <div className="absolute inset-0 z-[400] shadow-[inset_0_0_40px_rgba(0,0,0,0.1)] pointer-events-none" />
-                        </div>
-                        
-                        <div className="p-6 bg-white border-t border-gray-200 shadow-[0_-10px_30px_rgba(0,0,0,0.1)] relative z-10 rounded-t-[2rem]">
-                            <button onClick={() => { setMostrarMapaModal(false); UTILS.abrirMaps(endCliente); }} className="w-full h-16 bg-[#82C91E] text-[#4B0082] rounded-[20px] font-extrabold text-[16px] flex items-center justify-center gap-3 shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-all">
-                                <Lucide.Navigation size={22} fill="currentColor"/> Iniciar GPS do Telemóvel
-                            </button>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            {/* MODAL BOTTOM SHEET DE LEILÃO */}
+            {/* ALERTA DE LEILÃO */}
             <AnimatePresence>
                 {ofertaLeilao && !pedidoAtivo && (
                     <>
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[9998] bg-[#4B0082]/60 backdrop-blur-sm" onClick={recusarMissao} />
-                        <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }} transition={{ type: "spring", damping: 25, stiffness: 200 }} className="fixed bottom-0 left-0 right-0 z-[9999] bg-white rounded-t-[32px] p-6 pb-safe shadow-2xl flex flex-col">
-                            <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mb-6" />
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[9998] bg-[#4B0082]/80 backdrop-blur-sm" onClick={recusarMissao} />
+                        <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }} transition={{ type: "spring", damping: 25, stiffness: 200 }} className={`fixed bottom-0 left-0 right-0 z-[9999] ${theme.card} rounded-t-[2.5rem] p-6 pb-safe shadow-[0_-20px_50px_rgba(0,0,0,0.5)] flex flex-col border-t ${theme.border}`}>
+                            <div className={`w-16 h-1.5 ${theme.isDark ? 'bg-white/20' : 'bg-slate-300'} rounded-full mx-auto mb-6`} />
+                            
                             <div className="flex justify-between items-center mb-6">
-                                <h3 className="font-extrabold text-2xl text-[#4B0082]">Nova Rota!</h3>
-                                <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center animate-pulse"><Lucide.BellRing size={24} className="text-red-500" /></div>
+                                <h3 className="font-[1000] italic uppercase text-3xl tracking-tighter text-[#4B0082]">Nova Rota!</h3>
+                                <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center animate-pulse"><Lucide.BellRing size={24} className="text-red-500" /></div>
                             </div>
-                            <div className="bg-[#F4F6F8] p-5 rounded-2xl mb-6 flex justify-between items-center border border-[#E5D5F5]">
-                                <div><p className="text-[#4B0082]/70 text-xs font-bold mb-1 uppercase tracking-wider">O seu Ganho</p><p className="text-4xl font-extrabold text-[#82C91E]">R$ {obterTaxa(ofertaLeilao).toFixed(2)}</p></div>
+                            
+                            <div className={`bg-gradient-to-r from-[#4B0082] to-[#1F0137] p-6 rounded-3xl mb-6 shadow-xl`}>
+                                <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Pagamento da Rota</p>
+                                <p className="text-5xl font-[1000] italic text-[#82C91E] drop-shadow-md">R$ {Number(ofertaLeilao.valores?.taxa || 0).toFixed(2)}</p>
                             </div>
-                            <div className="space-y-6 mb-8 relative">
-                                <div className="flex items-start gap-4">
-                                    <div className="w-8 h-8 rounded-full bg-[#4B0082]/10 flex items-center justify-center z-10"><Lucide.Store size={16} className="text-[#4B0082]"/></div>
-                                    <div><p className="font-bold text-[16px] text-gray-900">Base Rodrigues</p><p className="text-gray-500 text-xs mt-0.5">Recolha</p></div>
+                            
+                            <div className="space-y-6 mb-8 relative px-2">
+                                <div className="flex items-start gap-4 relative z-10">
+                                    <div className="w-10 h-10 rounded-full bg-[#4B0082]/10 flex items-center justify-center shrink-0 border border-[#4B0082]/20"><Lucide.Store size={20} className="text-[#4B0082]"/></div>
+                                    <div><p className={`font-[1000] text-lg uppercase italic ${theme.text}`}>Base Rodrigues</p><p className={`text-[10px] font-bold uppercase tracking-widest ${theme.textMuted}`}>Ponto de Coleta</p></div>
                                 </div>
-                                <div className="absolute left-[15px] top-6 bottom-6 w-0.5 bg-[#E5D5F5] z-0" />
-                                <div className="flex items-start gap-4">
-                                    <div className="w-8 h-8 rounded-full bg-[#82C91E]/20 flex items-center justify-center z-10"><Lucide.MapPin size={16} className="text-[#4B0082]"/></div>
-                                    <div><p className="font-bold text-[16px] text-gray-900">{obterEndereco(ofertaLeilao).bairro || 'Destino'}</p><p className="text-gray-500 text-xs mt-0.5">Entrega Final</p></div>
+                                <div className={`absolute left-[27px] top-8 bottom-8 w-0.5 ${theme.isDark ? 'bg-white/10' : 'bg-slate-200'} z-0 border-dashed border-l-2`} />
+                                <div className="flex items-start gap-4 relative z-10">
+                                    <div className="w-10 h-10 rounded-full bg-[#EA1D2C]/10 flex items-center justify-center shrink-0 border border-[#EA1D2C]/20"><Lucide.MapPin size={20} className="text-[#EA1D2C]"/></div>
+                                    <div><p className={`font-[1000] text-lg uppercase italic ${theme.text}`}>{ofertaLeilao.endereco?.bairro || 'Destino'}</p><p className={`text-[10px] font-bold uppercase tracking-widest ${theme.textMuted}`}>Entrega ao Cliente</p></div>
                                 </div>
                             </div>
-                            <div className="flex gap-4">
-                                <button onClick={recusarMissao} className="w-[30%] h-14 bg-gray-100 text-gray-600 rounded-xl font-bold text-sm active:scale-95 transition-transform">Passar</button>
-                                <button onClick={aceitarMissao} className="w-[70%] h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[16px] shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-transform">Aceitar Pedido</button>
+                            
+                            <div className="flex gap-4 mt-auto">
+                                <button onClick={recusarMissao} className={`w-[30%] h-16 ${theme.isDark ? 'bg-white/5 text-white/50' : 'bg-slate-100 text-slate-500'} rounded-[1.5rem] font-black uppercase text-xs tracking-widest active:scale-95 transition-transform`}>Passar</button>
+                                <button onClick={aceitarMissao} className="w-[70%] h-16 bg-[#82C91E] text-[#4B0082] rounded-[1.5rem] font-[1000] uppercase text-sm tracking-widest shadow-[0_0_30px_rgba(130,201,30,0.3)] active:scale-95 transition-transform">Aceitar Rota</button>
                             </div>
                         </motion.div>
                     </>
                 )}
             </AnimatePresence>
 
-            {/* HEADER GESTOR */}
-            <header className="px-6 pt-14 pb-5 bg-[#4B0082] flex justify-between items-center z-50 shadow-md rounded-b-[32px]">
-                <div>
-                    <p className="text-white/70 text-[11px] font-bold uppercase tracking-widest mb-1">Painel Pro</p>
-                    <h1 className="font-extrabold text-2xl text-white leading-tight">{(piloto?.nome || 'Piloto').split(' ')[0]}</h1>
+            {/* HEADER COM STATUS */}
+            <header className={`${theme.card} p-5 pt-8 flex justify-between items-center shadow-lg border-b ${theme.border} z-20 shrink-0`}>
+                <div className="flex items-center gap-4">
+                    <div className={`w-14 h-14 rounded-[1.2rem] overflow-hidden border-2 ${isOnline ? 'border-[#82C91E]' : theme.border}`}>
+                        {piloto?.foto ? <img src={piloto.foto} alt="Perfil" className="w-full h-full object-cover" /> : <Lucide.User size={28} className={`mx-auto mt-3 ${theme.textMuted}`}/>}
+                    </div>
+                    <div>
+                        <h2 className="text-base font-[1000] uppercase italic tracking-wide truncate max-w-[150px]">{piloto?.nome?.split(' ')[0]}</h2>
+                        <span className={`text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 mt-0.5 ${isOnline ? 'text-[#82C91E]' : theme.textMuted}`}>
+                            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-[#82C91E] animate-ping' : theme.isDark ? 'bg-slate-600' : 'bg-slate-400'}`} /> 
+                            {isOnline ? 'Online' : 'Offline'}
+                        </span>
+                    </div>
                 </div>
-                <button onClick={alternarStatusGps} className={`px-5 py-3 rounded-full text-xs font-bold flex items-center gap-2 transition-all shadow-sm ${isOnline ? 'bg-[#82C91E] text-[#4B0082]' : 'bg-white/20 text-white backdrop-blur-md'}`}>
-                    <div className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-white animate-pulse' : 'bg-gray-300'}`} />
-                    {isOnline ? 'A Operar' : 'Ligar'}
+                
+                <button onClick={alternarStatus} className={`px-5 py-4 rounded-[1.2rem] font-[1000] text-[10px] uppercase tracking-widest transition-all active:scale-90 border-2 shadow-lg
+                    ${isOnline ? 'bg-red-500/10 text-red-500 border-red-500/30' : 'bg-[#82C91E] text-[#4B0082] border-[#82C91E]'}`}>
+                    {isOnline ? 'Pausar' : 'Ficar Online'}
                 </button>
             </header>
 
-            {/* ÁREA PRINCIPAL COM TRANSIÇÕES */}
-            <main className="flex-1 overflow-y-auto pb-[100px] relative p-5">
+            {/* ÁREA PRINCIPAL */}
+            <main className="flex-1 overflow-hidden relative z-0">
                 <AnimatePresence mode="wait">
                     
+                    {/* TELA: RADAR (ESPERANDO) */}
                     {abaAtiva === 'RADAR' && (
-                        <motion.div key="radar" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.2 }} className="h-full flex flex-col">
-                            {!pedidoAtivo ? (
-                                <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
-                                    <div className="mb-8 relative">
-                                        {isOnline ? (
-                                            <div className="w-28 h-28 bg-[#4B0082]/10 rounded-full flex items-center justify-center relative">
-                                                <motion.div animate={{ scale: [1, 1.5], opacity: [0.3, 0] }} transition={{ repeat: Infinity, duration: 1.5 }} className="absolute inset-0 bg-[#82C91E] rounded-full" />
-                                                <Lucide.MapPin size={40} className="text-[#82C91E] relative z-10" />
-                                            </div>
-                                        ) : (
-                                            <div className="w-28 h-28 bg-gray-200/50 rounded-full flex items-center justify-center"><Lucide.Moon size={40} className="text-gray-400" /></div>
-                                        )}
-                                    </div>
-                                    <h2 className="text-[24px] font-extrabold text-[#4B0082] mb-3">{isOnline ? 'A procurar rotas' : 'Sistema inativo'}</h2>
-                                    <p className="text-[15px] text-gray-500 font-medium">{isOnline ? 'Aguarde. O GPS rastreia em segundo plano.' : 'Ligue o seu estado para receber tarefas.'}</p>
+                        <motion.div key="radar" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="h-full overflow-y-auto p-6 pb-32 custom-scrollbar">
+                            <div className="bg-gradient-to-br from-[#1F0137] to-[#4B0082] p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden mb-8 text-white">
+                                <div className="absolute top-0 right-0 opacity-10 p-4"><Lucide.Banknote size={150} /></div>
+                                <p className="text-[10px] font-black text-[#82C91E] uppercase tracking-widest mb-1 flex items-center gap-2"><Lucide.TrendingUp size={14}/> Ganhos Hoje</p>
+                                <h2 className="text-6xl font-[1000] italic tracking-tighter drop-shadow-md my-2">{formatarMoeda(historico.reduce((acc, p) => acc + (p.valores?.taxa || 0), 0))}</h2>
+                                <div className="mt-8 pt-6 border-t border-white/10 flex gap-8">
+                                    <div><p className="text-[9px] font-bold text-white/50 uppercase tracking-widest mb-1">Rotas Feitas</p><p className="text-2xl font-black">{historico.length}</p></div>
                                 </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    <div className="bg-white rounded-[24px] p-6 border border-[#E5D5F5] shadow-sm">
-                                        
-                                        <div className="flex justify-between items-start mb-6 pb-6 border-b border-gray-100">
-                                            <div>
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Tarefa #{pedidoAtivo.id.slice(-4)}</p>
-                                                <p className="font-extrabold text-[#4B0082] text-sm mt-1">{pedidoAtivo.status.replace(/_/g, ' ')}</p>
-                                            </div>
-                                            <div className="text-right">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">A Receber</p>
-                                                <p className="font-extrabold text-[#82C91E] text-xl">R$ {obterTaxa(pedidoAtivo).toFixed(2)}</p>
-                                            </div>
-                                        </div>
-                                        
-                                        {/* THUMBNAIL DO MAPA FIXO (AGORA RETRO) */}
-                                        {temLatLgn && (
-                                            <div onClick={() => setMostrarMapaModal(true)} className="h-32 w-full bg-amber-50/50 rounded-[1.5rem] overflow-hidden mb-6 relative border-2 border-[#E5D5F5] shadow-sm cursor-pointer group">
-                                                <div className="absolute inset-0 z-10 bg-[#4B0082]/10 flex items-center justify-center group-hover:bg-[#4B0082]/20 transition-all">
-                                                    <span className="bg-white/95 text-[#4B0082] px-4 py-2 rounded-full font-black text-[10px] uppercase tracking-widest shadow-lg flex items-center gap-2 border border-[#E5D5F5]">
-                                                        <Lucide.Map size={14}/> Abrir Mapa ({distReal} km)
-                                                    </span>
-                                                </div>
-                                                <MapContainer center={[endCliente.lat, endCliente.lng]} zoom={13} zoomControl={false} dragging={false} scrollWheelZoom={false} className="w-full h-full retro-map-tiles">
-                                                    <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-                                                    <Marker position={LOJA_COORDS} icon={iconLoja} />
-                                                    <Marker position={[endCliente.lat, endCliente.lng]} icon={iconEntrega} />
-                                                    <Polyline positions={[LOJA_COORDS, [endCliente.lat, endCliente.lng]]} color="#4B0082" weight={3} dashArray="5, 10" />
-                                                </MapContainer>
-                                            </div>
-                                        )}
+                            </div>
 
-                                        <div className="mb-8">
-                                            <div className="flex items-start gap-4 mb-5">
-                                                <div className="w-10 h-10 rounded-full bg-[#F4F6F8] flex items-center justify-center"><Lucide.User size={18} className="text-[#4B0082]" /></div>
-                                                <div className="mt-1"><p className="font-bold text-[16px] text-[#333333] leading-none">{obterCliente(pedidoAtivo).nome}</p><p className="text-xs text-gray-500 mt-1.5 font-medium">Cliente Final</p></div>
-                                            </div>
-                                            <div className="flex items-start gap-4">
-                                                <div className="w-10 h-10 rounded-full bg-[#F4F6F8] flex items-center justify-center"><Lucide.MapPin size={18} className="text-[#82C91E]" /></div>
-                                                <div className="mt-1"><p className="font-bold text-[16px] text-[#333333] leading-tight">{endCliente.rua}, {endCliente.numero}</p><p className="text-xs text-gray-500 mt-1.5 font-medium">{endCliente.bairro}</p></div>
-                                            </div>
-                                        </div>
-
-                                        {(pedidoAtivo.pagamento?.metodo?.includes('DINHEIRO') || pedidoAtivo.pagamento?.metodo?.includes('MAQUININHA')) && (
-                                            <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-2xl">
-                                                <p className="text-[10px] font-bold uppercase tracking-widest text-orange-600 mb-1 flex items-center gap-1.5"><Lucide.Banknote size={14}/> Cobrar do cliente</p>
-                                                <p className="font-extrabold text-orange-600 text-2xl">R$ {obterTotal(pedidoAtivo).toFixed(2)}</p>
-                                                <p className="text-xs text-orange-800 font-medium mt-1">Método: {pedidoAtivo.pagamento?.metodo}</p>
-                                            </div>
-                                        )}
-                                        
-                                        <div className="flex gap-3 mb-6">
-                                            <button onClick={() => setMostrarMapaModal(true)} className="flex-1 h-14 bg-[#F4F6F8] text-[#4B0082] rounded-xl font-bold text-[14px] flex items-center justify-center gap-2 hover:bg-[#E5D5F5] active:scale-95 transition-all"><Lucide.Map size={18}/> Ver Mapa</button>
-                                            <button onClick={() => UTILS.abrirZap(obterCliente(pedidoAtivo).telefone, obterCliente(pedidoAtivo).nome)} className="w-14 h-14 bg-[#82C91E]/20 text-[#82C91E] rounded-xl flex items-center justify-center hover:bg-[#82C91E]/30 active:scale-95 transition-all"><Lucide.MessageCircle size={24}/></button>
-                                        </div>
-
-                                        {pedidoAtivo.status === 'A_CAMINHO_LOJA' && <button onClick={() => atualizarStatusCorrida('AGUARDANDO_COLETA')} className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[16px] shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-all">Cheguei à Base</button>}
-                                        {pedidoAtivo.status === 'AGUARDANDO_COLETA' && <button onClick={() => atualizarStatusCorrida('SAIU_ENTREGA')} className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[16px] shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-all">Recolhi o Pacote</button>}
-                                        {pedidoAtivo.status === 'SAIU_ENTREGA' && <button onClick={() => atualizarStatusCorrida('ENTREGADOR_NO_LOCAL')} className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[16px] shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-all">Cheguei ao Destino</button>}
-                                        {pedidoAtivo.status === 'ENTREGADOR_NO_LOCAL' && <button onClick={() => tirarFotoProva(pedidoAtivo)} className="w-full h-14 bg-[#82C91E] text-[#4B0082] rounded-xl font-extrabold text-[16px] flex items-center justify-center gap-2 shadow-lg shadow-[#82C91E]/30 active:scale-95 transition-all"><Lucide.Camera size={20}/> Fotografar e Concluir</button>}
-                                    </div>
+                            {!isOnline ? (
+                                <div className={`text-center pt-10 ${theme.textMuted}`}>
+                                    <Lucide.PowerOff size={80} strokeWidth={1} className="mx-auto mb-6 opacity-50" />
+                                    <p className="font-black uppercase text-sm tracking-widest">App Pausado</p>
+                                    <p className="text-[11px] font-bold mt-2 leading-relaxed max-w-[250px] mx-auto">Fique online para que a base e os clientes vejam sua localização no mapa.</p>
                                 </div>
-                            )}
+                            ) : !pedidoAtivo ? (
+                                <div className="text-center pt-10">
+                                    <div className="w-40 h-40 mx-auto rounded-full border-4 border-[#82C91E]/20 flex items-center justify-center relative mb-8">
+                                        <div className="absolute inset-0 rounded-full border-[3px] border-[#82C91E] animate-[ping_2.5s_cubic-bezier(0,0,0.2,1)_infinite] opacity-50"/>
+                                        <Lucide.Radar size={48} className="text-[#82C91E]" />
+                                    </div>
+                                    <h3 className="font-[1000] text-2xl uppercase italic tracking-tighter mb-2">Buscando Rotas...</h3>
+                                    <p className={`font-black uppercase text-[10px] tracking-widest ${theme.textMuted}`}>Deixe a tela acesa e o som ligado.</p>
+                                </div>
+                            ) : null}
                         </motion.div>
                     )}
 
-                    {abaAtiva === 'CARTEIRA' && (
-                        <motion.div key="carteira" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.2 }} className="h-full flex flex-col">
-                            <h2 className="text-[24px] font-extrabold text-[#4B0082] mb-6">Financeiro</h2>
-                            
-                            <div className="bg-white rounded-[24px] p-6 mb-5 border border-[#E5D5F5] shadow-sm relative overflow-hidden">
-                                <div className="absolute -right-4 -bottom-4 opacity-5"><Lucide.Wallet size={120} className="text-[#4B0082]" /></div>
-                                <p className="text-gray-400 text-[11px] font-bold uppercase tracking-wider mb-2">Saldo Líquido</p>
-                                <p className="text-[42px] font-extrabold text-[#82C91E] mb-6 leading-none relative z-10">{UTILS.formatarMoeda(piloto?.saldoLiquido)}</p>
+                    {/* TELA: ROTA DINÂMICA (MAPA FULL) */}
+                    {abaAtiva === 'ROTA' && pedidoAtivo && (
+                        <motion.div key="rota" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 z-10 flex flex-col">
+                            <div className="flex-1 relative">
+                                <LiveMapDriver pedido={pedidoAtivo} myLocation={myLocation} />
                                 
-                                <div className="bg-[#F4F6F8] p-4 rounded-xl flex justify-between items-center mb-3 relative z-10">
-                                    <div className="flex items-center gap-3"><div className="w-2.5 h-2.5 rounded-full bg-[#82C91E]"/><span className="text-[13px] font-bold text-gray-600">Ganhos de Taxas</span></div>
-                                    <span className="font-extrabold text-[#333333] text-[15px]">{UTILS.formatarMoeda(piloto?.ganhosTaxas)}</span>
-                                </div>
-                                <div className="bg-red-50 p-4 rounded-xl flex justify-between items-center relative z-10">
-                                    <div className="flex items-center gap-3"><div className="w-2.5 h-2.5 rounded-full bg-red-500"/><span className="text-[13px] font-bold text-gray-600">A repassar à Loja</span></div>
-                                    <span className="font-extrabold text-red-500 text-[15px]">{UTILS.formatarMoeda(piloto?.debitosLoja)}</span>
-                                </div>
-                            </div>
-                            
-                            <div className="bg-white rounded-[24px] border border-[#E5D5F5] p-6 shadow-sm flex items-center justify-between">
-                                <div><p className="text-[28px] font-extrabold text-[#4B0082] leading-none mb-1">{piloto?.totalEntregas || 0}</p><p className="text-gray-400 text-[11px] font-bold uppercase tracking-wider">Entregas hoje</p></div>
-                                <div className="w-14 h-14 bg-[#82C91E]/10 rounded-full flex items-center justify-center"><Lucide.CheckCircle size={28} className="text-[#82C91E]" /></div>
-                            </div>
-                        </motion.div>
-                    )}
-
-                    {abaAtiva === 'CHAT' && (
-                        <motion.div key="chat" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.2 }} className="flex flex-col h-full">
-                            <h2 className="text-[24px] font-extrabold text-[#4B0082] mb-6">Central de Apoio</h2>
-                            <div className="flex-1 rounded-[24px] border border-[#E5D5F5] bg-white overflow-hidden flex flex-col shadow-sm">
-                                <div className="flex-1 p-5 overflow-y-auto space-y-4 custom-scrollbar">
-                                    {chatMsgs.length === 0 && <div className="h-full flex flex-col justify-center items-center opacity-40"><Lucide.MessageSquare size={40} className="mb-4 text-gray-400"/><p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Sem mensagens</p></div>}
-                                    {chatMsgs.map(m => (
-                                        <div key={m.id} className={`flex flex-col max-w-[85%] ${m.remetente === 'PILOTO' ? 'self-end items-end' : 'self-start items-start'}`}>
-                                            <div className={`px-5 py-3.5 text-[13px] font-medium leading-relaxed shadow-sm ${m.remetente === 'PILOTO' ? 'bg-[#4B0082] text-white rounded-2xl rounded-br-sm' : 'bg-[#F4F6F8] text-[#333333] rounded-2xl rounded-bl-sm border border-gray-100'}`}>{m.texto}</div>
-                                        </div>
-                                    ))}
-                                </div>
-                                <form onSubmit={enviarChat} className="p-4 bg-white border-t border-gray-100 flex gap-3">
-                                    <input type="text" value={novaMsg} onChange={e=>setNovaMsg(e.target.value)} placeholder="Escreva aqui..." className="flex-1 h-14 rounded-full bg-[#F4F6F8] px-6 text-[#333333] text-[14px] font-medium outline-none focus:ring-2 focus:ring-[#82C91E]/50 border border-transparent focus:border-[#82C91E]" />
-                                    <button type="submit" className="w-14 h-14 bg-[#82C91E] text-[#4B0082] rounded-full flex items-center justify-center active:scale-95 transition-transform"><Lucide.Send size={20} className="ml-1"/></button>
-                                </form>
-                            </div>
-                        </motion.div>
-                    )}
-
-                    {abaAtiva === 'PERFIL' && (
-                        <motion.div key="perfil" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.2 }} className="h-full flex flex-col">
-                            <h2 className="text-[24px] font-extrabold text-[#4B0082] mb-6">Menu Operacional</h2>
-                            
-                            {/* 1. OPÇÕES FINANCEIRAS: CHAVE PIX */}
-                            <div className="bg-white rounded-[24px] border border-[#E5D5F5] overflow-hidden shadow-sm mb-5 p-5">
-                                <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Lucide.Banknote size={14}/> Opções Financeiras</h3>
-                                <div className="bg-[#F4F6F8] p-4 rounded-xl border border-gray-200 focus-within:border-[#82C91E] transition-colors">
-                                    <label className="text-[10px] font-bold text-[#4B0082] uppercase tracking-wider mb-2 block">Sua Chave PIX (Para repasses)</label>
-                                    <input 
-                                        type="text" 
-                                        value={pixInput} 
-                                        onChange={e => setPixInput(e.target.value)} 
-                                        onBlur={() => atualizarPerfilConfig('chavePix', pixInput)}
-                                        placeholder="Ex: seu-email@gmail.com ou CPF" 
-                                        className="w-full bg-transparent text-[14px] font-bold text-[#333333] outline-none"
-                                    />
-                                </div>
-                            </div>
-
-                            {/* 2. OPÇÕES DE ROTAS: BÚSSOLA PIZZA E VOLTAR PRA CASA */}
-                            <div className="bg-white rounded-[24px] border border-[#E5D5F5] overflow-hidden shadow-sm mb-5 p-5">
-                                <div className="flex justify-between items-center mb-5">
-                                    <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2"><Lucide.Compass size={14}/> Controle de Rotas</h3>
-                                    
-                                    {/* Toggle Voltar pra Casa */}
-                                    <button onClick={() => atualizarPerfilConfig('modoVoltarCasa', !piloto?.modoVoltarCasa)} className={`w-14 h-7 rounded-full transition-all relative border flex items-center px-1 ${piloto?.modoVoltarCasa ? 'bg-[#82C91E] border-[#82C91E]' : 'bg-gray-200 border-gray-300'}`}>
-                                        <div className={`w-5 h-5 bg-white rounded-full shadow-md transition-transform ${piloto?.modoVoltarCasa ? 'translate-x-7' : 'translate-x-0'}`} />
+                                <div className="absolute top-6 right-6 z-[1000] flex flex-col gap-4">
+                                    <button onClick={() => window.open(`https://waze.com/ul?ll=${pedidoAtivo.endereco.lat},${pedidoAtivo.endereco.lng}&navigate=yes`, '_blank')} className="w-16 h-16 bg-white rounded-full shadow-[0_10px_30px_rgba(0,0,0,0.3)] flex items-center justify-center border-4 border-[#1F0137] active:scale-90 transition-transform">
+                                        <img src="https://upload.wikimedia.org/wikipedia/commons/4/48/Waze_Logo.png" alt="Waze" className="w-8 h-8 object-contain" />
+                                    </button>
+                                    <button onClick={() => {
+                                        const motivo = prompt("🚨 SOS: Qual a emergência? (Pneu, Acidente, etc)");
+                                        if(motivo) { updateDoc(doc(db,"pedidos",pedidoAtivo.id), {observacaoSOS: motivo}); setIsSOS(true); toast("SOS Enviado!","success"); }
+                                    }} className={`w-16 h-16 rounded-full shadow-[0_10px_30px_rgba(0,0,0,0.3)] flex items-center justify-center border-4 transition-colors ${isSOS ? 'bg-red-600 text-white border-white animate-pulse' : 'bg-white text-red-600 border-red-600'}`}>
+                                        <Lucide.Siren size={28} />
                                     </button>
                                 </div>
-                                <p className="text-[12px] font-medium text-gray-500 mb-4">{piloto?.modoVoltarCasa ? '🏡 Modo Voltar para Casa ATIVADO. Buscando rotas na direção escolhida abaixo:' : 'Escolha um Setor (Pizza) para priorizar:'}</p>
-
-                                {/* Grade da "Pizza" (Bússola Direcional) */}
-                                <div className="grid grid-cols-3 gap-2 bg-[#F4F6F8] p-4 rounded-xl border border-gray-200">
-                                    {direcoesBussola.map(dir => (
-                                        <button 
-                                            key={dir.id}
-                                            onClick={() => atualizarPerfilConfig('setorPreferencia', dir.id)}
-                                            className={`py-3 rounded-lg text-[10px] font-bold transition-all ${piloto?.setorPreferencia === dir.id ? 'bg-[#4B0082] text-[#82C91E] shadow-md border-2 border-[#82C91E]' : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'}`}
-                                        >
-                                            {dir.label}
-                                        </button>
-                                    ))}
-                                </div>
                             </div>
 
-                            {/* 3. AÇÕES RÁPIDAS (S.O.S E RESGATAR ITEM) */}
-                            <div className="grid grid-cols-2 gap-4 mb-5">
-                                <button onClick={acionarResgate} className="bg-amber-500 hover:bg-amber-600 text-white rounded-[20px] p-4 flex flex-col items-center justify-center gap-2 shadow-sm active:scale-95 transition-transform border border-amber-600">
-                                    <Lucide.PackageOpen size={28}/>
-                                    <span className="text-[11px] font-black uppercase tracking-widest text-center leading-tight">Resgatar<br/>Outro Item</span>
-                                </button>
-                                <button onClick={acionarSOS} className="bg-[#EA1D2C] hover:bg-red-700 text-white rounded-[20px] p-4 flex flex-col items-center justify-center gap-2 shadow-sm active:scale-95 transition-transform border border-red-800">
-                                    <Lucide.Siren size={28} className="animate-pulse"/>
-                                    <span className="text-[11px] font-black uppercase tracking-widest text-center leading-tight">S.O.S<br/>Emergência</span>
-                                </button>
-                            </div>
+                            <div className={`${theme.card} rounded-t-[3rem] shadow-[0_-20px_50px_rgba(0,0,0,0.2)] flex flex-col relative z-[2000] border-t ${theme.border}`}>
+                                <div className={`w-16 h-1.5 ${theme.isDark ? 'bg-white/20' : 'bg-slate-300'} rounded-full mx-auto mt-5 mb-3 shrink-0`} />
+                                
+                                <div className="p-6 pt-2 overflow-y-auto max-h-[65vh] custom-scrollbar">
+                                    
+                                    {pedidoAtivo.pagamento?.metodo?.includes('Na Entrega') && (
+                                        <div className="bg-[#EA1D2C] p-6 rounded-[2rem] mb-6 border-[3px] border-red-400 animate-pulse shadow-[0_0_30px_rgba(234,29,44,0.4)]">
+                                            <p className="text-[11px] font-[1000] text-white uppercase tracking-widest mb-1 flex items-center gap-2"><Lucide.AlertOctagon size={18}/> ATENÇÃO: COBRAR NA ENTREGA!</p>
+                                            <p className="text-5xl font-[1000] text-white tracking-tighter drop-shadow-md my-2">R$ {Number(pedidoAtivo.valores?.total || 0).toFixed(2)}</p>
+                                            <p className="text-[11px] font-bold text-red-100 uppercase mt-2">Pagamento: {pedidoAtivo.pagamento.metodo}</p>
+                                            {pedidoAtivo.pagamento.valorTrocoPara && <p className="text-[10px] font-black text-white uppercase mt-3 bg-black/40 px-4 py-3 rounded-xl inline-block shadow-inner">Levar troco para R$ {pedidoAtivo.pagamento.valorTrocoPara}</p>}
+                                        </div>
+                                    )}
 
-                            {/* 4. PERFIL BÁSICO E SAIR */}
-                            <div className="bg-white rounded-[24px] border border-[#E5D5F5] overflow-hidden shadow-sm mt-auto">
-                                <div className="p-5 border-b border-gray-100 flex items-center gap-4 bg-[#F4F6F8]">
-                                    <div className="w-14 h-14 bg-white rounded-2xl flex items-center justify-center border border-gray-200 shadow-sm shrink-0"><Lucide.User size={24} className="text-[#4B0082]" /></div>
-                                    <div className="overflow-hidden">
-                                        <p className="font-extrabold text-[#333333] text-[16px] mb-0.5 truncate">{piloto?.nome}</p>
-                                        <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Doc: {UTILS.mascararCPF(piloto?.cpf || '')}</p>
+                                    <div className="mb-6">
+                                        <h3 className={`text-[10px] font-black uppercase tracking-widest mb-3 flex items-center gap-2 ${theme.textMuted}`}><Lucide.MapPin size={14}/> Destino</h3>
+                                        <p className="text-2xl font-[1000] uppercase italic leading-tight">{pedidoAtivo.endereco?.rua}, {pedidoAtivo.endereco?.numero}</p>
+                                        <p className={`text-sm font-bold uppercase mt-1 ${theme.textMuted}`}>{pedidoAtivo.endereco?.bairro}</p>
+                                        {pedidoAtivo.endereco?.complemento && <p className="text-[10px] font-black text-amber-600 uppercase mt-3 bg-amber-500/10 px-4 py-3 rounded-xl border border-amber-500/20 inline-block">Ref: {pedidoAtivo.endereco.complemento}</p>}
+                                    </div>
+
+                                    <div className={`p-5 rounded-2xl border ${theme.border} mb-6 flex justify-between items-center bg-transparent`}>
+                                        <div>
+                                            <p className={`text-[9px] font-black uppercase tracking-widest mb-1 ${theme.textMuted}`}>Cliente</p>
+                                            <p className="text-lg font-[1000] uppercase">{pedidoAtivo.cliente?.nome}</p>
+                                        </div>
+                                        <a href={`tel:${pedidoAtivo.cliente?.telefone}`} className={`w-14 h-14 ${theme.isDark ? 'bg-white/10' : 'bg-slate-100'} rounded-2xl flex items-center justify-center active:scale-90 transition-transform border ${theme.border}`}>
+                                            <Lucide.Phone size={24} className={theme.text}/>
+                                        </a>
+                                    </div>
+
+                                    {pedidoAtivo.alertaLoja && (
+                                        <div className="bg-blue-600/20 border border-blue-500 p-5 rounded-2xl mb-8">
+                                            <p className="text-[10px] font-black text-blue-500 uppercase flex items-center gap-2 mb-2"><Lucide.Bell size={14}/> A Torre Informa</p>
+                                            <p className={`text-sm font-bold ${theme.isDark ? 'text-blue-100' : 'text-blue-900'} italic`}>"{pedidoAtivo.alertaLoja}"</p>
+                                        </div>
+                                    )}
+
+                                    <div className="flex flex-col gap-3">
+                                        {pedidoAtivo.status === 'A_CAMINHO_LOJA' && <button onClick={() => atualizarCorrida('AGUARDANDO_COLETA')} className="w-full h-16 bg-[#82C91E] text-[#4B0082] rounded-[1.5rem] font-[1000] text-sm uppercase tracking-widest shadow-[0_0_20px_rgba(130,201,30,0.3)] active:scale-95 transition-all">Cheguei à Base</button>}
+                                        {pedidoAtivo.status === 'AGUARDANDO_COLETA' && <button onClick={() => atualizarCorrida('SAIU_ENTREGA')} className="w-full h-16 bg-[#82C91E] text-[#4B0082] rounded-[1.5rem] font-[1000] text-sm uppercase tracking-widest shadow-[0_0_20px_rgba(130,201,30,0.3)] active:scale-95 transition-all">Pacote Recolhido</button>}
+                                        {pedidoAtivo.status === 'SAIU_ENTREGA' && <button onClick={() => atualizarCorrida('ENTREGADOR_NO_LOCAL')} className="w-full h-16 bg-[#82C91E] text-[#4B0082] rounded-[1.5rem] font-[1000] text-sm uppercase tracking-widest shadow-[0_0_20px_rgba(130,201,30,0.3)] active:scale-95 transition-all">Cheguei no Cliente</button>}
+                                        
+                                        {pedidoAtivo.status === 'ENTREGADOR_NO_LOCAL' && (
+                                            <div className={`pt-4 border-t ${theme.border} mt-2`}>
+                                                <p className={`text-[10px] font-black uppercase tracking-widest mb-4 text-center ${theme.textMuted}`}>Finalização Segura</p>
+                                                <div className="flex gap-3">
+                                                    <input type="number" value={tokenInput} onChange={e => setTokenInput(e.target.value)} placeholder="Token" className={`flex-[1] border-2 rounded-2xl px-2 text-xl font-[1000] text-center outline-none focus:border-[#82C91E] tracking-[0.1em] transition-colors ${theme.input}`} />
+                                                    <button onClick={() => cameraInputRef.current?.click()} className="flex-[1] bg-slate-200 text-slate-700 rounded-2xl font-black uppercase text-[10px] tracking-widest active:scale-95 flex flex-col justify-center items-center gap-1 border-2 border-slate-300"><Lucide.Camera size={20}/> Com Foto</button>
+                                                    <button onClick={() => concluirCorrida()} disabled={tokenInput.length < 4} className="flex-[2] bg-[#82C91E] disabled:bg-slate-700 disabled:opacity-50 text-[#4B0082] rounded-2xl font-[1000] uppercase text-xs tracking-widest shadow-[0_0_20px_rgba(130,201,30,0.3)] active:scale-95 transition-all">Finalizar</button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
-                                <div className="p-2">
-                                    <button onClick={() => { auth.signOut(); localStorage.removeItem('@UP:cpf'); setPiloto(null); setSecao('INTRO'); }} className="w-full flex items-center justify-between p-4 text-left hover:bg-red-50 rounded-xl transition-colors group">
-                                        <div className="flex items-center gap-4"><div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center group-hover:bg-red-200 transition-colors"><Lucide.LogOut size={20} className="text-red-600"/></div> <span className="font-bold text-red-600 text-[14px]">Sair da Conta</span></div>
+                            </div>
+                        </motion.div>
+                    )}
+
+                    {/* TELA: PERFIL */}
+                    {abaAtiva === 'PERFIL' && (
+                        <motion.div key="perfil" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="h-full overflow-y-auto p-6 pb-32 custom-scrollbar">
+                            <div className={`${theme.card} p-8 rounded-[3rem] border ${theme.border} text-center mb-6 shadow-lg`}>
+                                <div className={`w-32 h-32 mx-auto rounded-full overflow-hidden border-4 border-[#4B0082] mb-5 ${theme.isDark ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                                    {piloto?.foto ? <img src={piloto.foto} alt="Perfil" className="w-full h-full object-cover" /> : <Lucide.User size={60} className={`mx-auto mt-8 ${theme.textMuted}`}/>}
+                                </div>
+                                <h2 className="text-2xl font-[1000] uppercase italic tracking-tighter">{piloto?.nome}</h2>
+                                <p className={`text-xs font-bold mt-1 ${theme.textMuted}`}>{piloto?.email}</p>
+                                <span className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 bg-[#82C91E]/10 text-[#82C91E] text-[10px] font-black uppercase tracking-widest rounded-xl border border-[#82C91E]/30">
+                                    <Lucide.ShieldCheck size={14}/> Piloto Verificado
+                                </span>
+                            </div>
+
+                            <div className="space-y-4 mb-8">
+                                <div className={`${theme.card} p-6 rounded-3xl border ${theme.border} flex items-center justify-between shadow-sm`}>
+                                    <div>
+                                        <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${theme.textMuted}`}>Chave PIX (Para Repasse)</p>
+                                        <p className="text-base font-bold">{piloto?.pix || 'Não informada'}</p>
+                                    </div>
+                                    <button className={`p-3 rounded-xl border ${theme.border} active:scale-90`} onClick={() => { const p = prompt("Digite a nova Chave PIX:"); if(p) updateDoc(doc(db,"entregadores",piloto.id),{pix: p}).then(()=>toast("PIX Atualizado", "success")); }}>
+                                        <Lucide.Edit2 size={18} className={theme.textMuted}/>
                                     </button>
                                 </div>
+                                <div className={`${theme.card} p-6 rounded-3xl border ${theme.border} flex items-center justify-between shadow-sm`}>
+                                    <div>
+                                        <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${theme.textMuted}`}>Veículo / Placa</p>
+                                        <p className="text-base font-bold">{piloto?.veiculo || 'Não informado'} {piloto?.placa && `• ${piloto.placa}`}</p>
+                                    </div>
+                                </div>
                             </div>
+
+                            <div className={`p-6 rounded-3xl border ${theme.border} flex items-center justify-between mb-8 bg-transparent`}>
+                                <div>
+                                    <p className="text-sm font-[1000] uppercase tracking-wide">Modo Noturno / Dark</p>
+                                    <p className={`text-[10px] font-bold mt-1 ${theme.textMuted}`}>Tema e mapa escuros para a noite.</p>
+                                </div>
+                                <button onClick={theme.toggle} className={`w-16 h-10 rounded-full p-1 flex items-center transition-colors ${theme.isDark ? 'bg-[#82C91E]' : 'bg-slate-300'}`}>
+                                    <motion.div animate={{ x: theme.isDark ? 24 : 0 }} className={`w-8 h-8 rounded-full shadow-md flex items-center justify-center ${theme.isDark ? 'bg-[#4B0082]' : 'bg-white'}`}>
+                                        {theme.isDark ? <Lucide.Moon size={14} className="text-white"/> : <Lucide.Sun size={14} className="text-yellow-500"/>}
+                                    </motion.div>
+                                </button>
+                            </div>
+
+                            <button onClick={() => { if(window.confirm("Tem certeza que quer sair?")) auth.signOut(); }} className="w-full py-6 bg-red-500/10 text-red-500 border-2 border-red-500/20 rounded-[2rem] font-[1000] text-[11px] uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-all">
+                                <Lucide.LogOut size={20}/> Desconectar Conta
+                            </button>
                         </motion.div>
                     )}
 
                 </AnimatePresence>
             </main>
 
-            {/* BARRA DE NAVEGAÇÃO INFERIOR */}
-            <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 px-6 pb-safe z-[9000] shadow-[0_-10px_40px_rgba(75,0,130,0.05)]">
-                <nav className="flex justify-between items-center h-[80px]">
-                    {[ 
-                        { id: 'RADAR', label: 'Início', icon: Lucide.Home }, 
-                        { id: 'CARTEIRA', label: 'Ganhos', icon: Lucide.Wallet }, 
-                        { id: 'CHAT', label: 'Chat', icon: Lucide.MessageSquare },
-                        { id: 'PERFIL', label: 'Menu', icon: Lucide.Menu } 
-                    ].map(i => (
-                        <button key={i.id} onClick={() => { setAbaAtiva(i.id); UTILS.vibrar(15); }} className="flex flex-col items-center justify-center gap-1.5 w-16 h-full transition-all relative active:scale-90">
-                            {abaAtiva === i.id && <motion.div layoutId="nav-indicator" className="absolute top-0 w-10 h-1 bg-[#82C91E] rounded-b-full" />}
-                            <i.icon size={24} className={`mt-1 transition-colors ${abaAtiva === i.id ? 'text-[#4B0082]' : 'text-gray-400'}`} strokeWidth={abaAtiva === i.id ? 2.5 : 2} />
-                            <span className={`text-[10px] font-bold transition-colors ${abaAtiva === i.id ? 'text-[#4B0082]' : 'text-gray-400'}`}>{i.label}</span>
-                        </button>
-                    ))}
-                </nav>
-            </div>
+            {/* NAVBAR INFERIOR TIPO UBER */}
+            <nav className={`${theme.card} h-20 border-t ${theme.border} flex justify-around items-center shrink-0 shadow-[0_-20px_30px_rgba(0,0,0,0.1)] pb-safe-bottom fixed bottom-0 left-0 right-0 z-40 transition-colors`}>
+                {[
+                    { id: 'RADAR', icon: Lucide.Home, label: 'Painel' },
+                    { id: 'ROTA', icon: Lucide.Map, label: 'Rota', badge: pedidoAtivo ? '!' : null },
+                    { id: 'PERFIL', icon: Lucide.User, label: 'Perfil' }
+                ].map(item => (
+                    <button key={item.id} onClick={() => { if(item.id === 'ROTA' && !pedidoAtivo) return toast("Nenhuma rota ativa.", "info"); setAbaAtiva(item.id); }} className={`flex flex-col items-center justify-center gap-1 w-16 h-16 rounded-2xl transition-all relative ${abaAtiva === item.id ? (theme.isDark ? 'bg-white/10' : 'bg-[#82C91E]/10') : 'hover:bg-slate-500/10'}`}>
+                        <item.icon size={24} strokeWidth={abaAtiva === item.id ? 2.5 : 2} className={abaAtiva === item.id ? (theme.isDark ? 'text-[#82C91E]' : 'text-[#4B0082]') : theme.textMuted} />
+                        <span className={`text-[8px] font-black uppercase tracking-widest ${abaAtiva === item.id ? (theme.isDark ? 'text-[#82C91E]' : 'text-[#4B0082]') : theme.textMuted}`}>{item.label}</span>
+                        {item.badge && <span className="absolute top-2 right-2 w-3 h-3 bg-[#EA1D2C] border-2 border-white rounded-full flex items-center justify-center text-[8px] font-black text-white animate-pulse" />}
+                    </button>
+                ))}
+            </nav>
 
-            <style>{`
-                /* CSS PARA O MAPA RETRO VINTAGE */
-                .retro-map-tiles .leaflet-tile-pane {
-                    filter: sepia(0.8) contrast(1.2) brightness(0.9) saturate(0.6) hue-rotate(-10deg);
-                }
-            `}</style>
         </div>
     );
+};
+
+// Envolver com os provedores para o tema funcionar
+export default function EntregadorMobileWrapper() {
+    return <AppProviders><PilotoApp /></AppProviders>;
 }

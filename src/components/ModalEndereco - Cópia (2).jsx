@@ -4,7 +4,7 @@ import { MapContainer, TileLayer, useMapEvents, Polyline, Marker } from 'react-l
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { db, auth } from "../services/firebase";
-import { collection, addDoc, serverTimestamp, doc, onSnapshot } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 // --- CONFIGURAÇÕES DO SISTEMA ---
 const STORE_COORDS = [-20.43131, -54.55412];
@@ -24,15 +24,6 @@ const TAGS_RAPIDAS = ["Não tocar campainha", "Deixar na portaria", "Ligar ao ch
 
 export default function ModalEndereco({ isOpen, onClose }) {
   const mapRef = useRef(null);
-const [configLogistica, setConfigLogistica] = useState(null);
-
-useEffect(() => {
-  // Escuta a sua matriz de frete oficial
-  const unsub = onSnapshot(doc(db, "configuracoes_loja", "logistica"), (snap) => {
-    if (snap.exists()) setConfigLogistica(snap.data());
-  });
-  return () => unsub();
-}, []);
   const numeroInputRef = useRef(null);
   const compRef = useRef(null); // <-- CORREÇÃO: A ref do complemento que faltava
   
@@ -93,45 +84,18 @@ useEffect(() => {
     return () => clearTimeout(timer);
   }, [busca, etapa]);
 
- const calcularLogistica = async (lat, lng) => {
-    const resRota = await fetch(`https://router.project-osrm.org/route/v1/driving/${STORE_COORDS[1]},${STORE_COORDS[0]};${lng},${lat}?overview=full&geometries=geojson`);
-    const dataRota = await resRota.json();
-
-    if (dataRota.routes?.length > 0 && configLogistica) {
+  const calcularLogistica = async (lat, lng) => {
+      const resRota = await fetch(`https://router.project-osrm.org/route/v1/driving/${STORE_COORDS[1]},${STORE_COORDS[0]};${lng},${lat}?overview=full&geometries=geojson`);
+      const dataRota = await resRota.json();
+      if (dataRota.routes?.length > 0) {
         const r = dataRota.routes[0];
-        const kmReal = r.distance / 1000; // Distância exata em números
-        const kmFormatado = kmReal.toFixed(1);
-        
-        let taxaCalculada = 0;
-        let achouRegra = false;
-
-        // 1. Procura na sua Tabela de Fretes do Painel
-        const tabelaOrdenada = [...configLogistica.tabelaTaxas].sort((a, b) => a.distanciaKm - b.distanciaKm);
-        
-        for (let regra of tabelaOrdenada) {
-            if (kmReal <= regra.distanciaKm) {
-                taxaCalculada = regra.valor;
-                achouRegra = true;
-                break;
-            }
-        }
-
-        // 2. Se a distância for maior que o limite da tabela, aplica o KM Adicional
-        if (!achouRegra && tabelaOrdenada.length > 0) {
-            const ultimaRegra = tabelaOrdenada[tabelaOrdenada.length - 1];
-            const kmExtra = kmReal - ultimaRegra.distanciaKm;
-            taxaCalculada = ultimaRegra.valor + (kmExtra * (configLogistica.valorKmAdicional || 0));
-        }
-
+        const kmVal = (r.distance / 1000).toFixed(1);
+        const taxaNum = parseFloat(kmVal); 
         setRotaCoords(r.geometry.coordinates.map(c => [c[1], c[0]]));
-        
-        return { 
-            km: kmFormatado, 
-            taxa: taxaCalculada.toFixed(2).replace('.', ',') 
-        };
-    }
-    return { km: "0.0", taxa: "0,00" };
-};
+        return { km: kmVal, taxa: taxaNum.toFixed(2).replace('.', ',') };
+      }
+      return { km: "0.0", taxa: "0,00" };
+  };
 
   // 2. INTELIGÊNCIA CENTRAL (ARRASTE + CEP)
   const processarLocalizacaoCentral = async (lat, lng, forcarBusca = false) => {
@@ -221,7 +185,7 @@ useEffect(() => {
           return alert("O CEP precisa estar completo (8 números).");
       }
       
-      const payload = { ...dados, complemento, tipo: tipoLocal, timestamp: serverTimestamp() };
+      const payload = { ...dados, complemento, tipo: tipoLocal, createdAt: serverTimestamp() };
       
       if (auth.currentUser) await addDoc(collection(db, "usuarios", auth.currentUser.uid, "meus_enderecos"), payload);
       localStorage.setItem('endereco_rodrigues', JSON.stringify(payload));
